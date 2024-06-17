@@ -14,5 +14,4 @@ int main () {
     // 4294967295U
 
     std::cout << std::bitset<64>(i64) << std::endl;
-    UINT32_MAX
 }

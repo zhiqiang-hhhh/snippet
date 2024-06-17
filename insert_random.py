@@ -25,10 +25,14 @@ def get_table_structure(cursor, table_name):
 
 def generate_random_data(column, faker):
     col_type = column[1]
+    col_name = column[0]
     if 'INT' in col_type:
         return random.randint(0, 1000)
     elif 'VARCHAR' in col_type or 'TEXT' in col_type:
-        return faker.text(max_nb_chars=int(col_type.split('(')[1][:-1]))
+        if col_name == 'KPI_CODE' or col_name == 'KPI_ID' or col_name == 'FLIGHT_DATE':
+            return f"""{random.choice(['A', 'B', 'C'])}"""
+        else:
+            return faker.text(max_nb_chars=int(col_type.split('(')[1][:-1]))
     elif 'DATE' in col_type:
         return faker.date()
     elif 'DATETIME' in col_type:
@@ -38,7 +42,7 @@ def generate_random_data(column, faker):
     else:
         return None
 
-def insert_random_data(connection, table_name, columns, faker, num_rows=10):
+def insert_random_data(connection, table_name, columns, faker, num_rows=100):
     cursor = connection.cursor()
     for _ in range(num_rows):
         row_data = [generate_random_data(col, faker) for col in columns]
@@ -54,7 +58,7 @@ def generate_ddl(table_name, col_name, col_type):
               distributed by hash({col_name[0]}) properties("replication_num"="1")"""
     return ddl
 
-def create_table_and_insert_random_data(table_name, col_name, col_type, ddl="", num_rows=10):
+def create_table_and_insert_random_data(table_name, col_name, col_type, ddl="", num_rows=100):
     if not ddl:
         ddl = generate_ddl(table_name, col_name, col_type)
 
@@ -70,7 +74,7 @@ def create_table_and_insert_random_data(table_name, col_name, col_type, ddl="", 
         columns = get_table_structure(cursor, table_name)
 
         # Insert random data
-        insert_random_data(connection, table_name, columns, faker)
+        insert_random_data(connection, table_name, columns, faker, num_rows)
 
         print(f"Successfully inserted random data into {table_name}")
     finally:
@@ -100,7 +104,7 @@ def main():
         "disable_auto_compaction" = "false",
         "enable_single_replica_compaction" = "false");
     """
-    create_table_and_insert_random_data(table_name, [], [], ddl1, 10)
+    create_table_and_insert_random_data(table_name, [], [], ddl1, 100)
     table_name = "DWA_CHECK_KPI"
     ddl2 = """
                 CREATE TABLE `DWA_CHECK_KPI` (
@@ -134,7 +138,7 @@ def main():
         "enable_single_replica_compaction" = "false"
         );
     """
-    create_table_and_insert_random_data(table_name, [], [], ddl2, 10)
+    create_table_and_insert_random_data(table_name, [], [], ddl2, 100)
     table_name = "DIM_KPI_CUBE"
     ddl3 = """
     CREATE TABLE `DIM_KPI_CUBE` (
@@ -167,7 +171,7 @@ PROPERTIES (
 "enable_single_replica_compaction" = "false"
 );
     """
-    create_table_and_insert_random_data(table_name, [], [], ddl3, 10)
+    create_table_and_insert_random_data(table_name, [], [], ddl3, 100)
 
 if __name__ == "__main__":
     main()
