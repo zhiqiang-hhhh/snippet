@@ -4,7 +4,22 @@
 #include <iostream>
 #include <iomanip>
 #include <cstdint>
+#include <limits>
 #include <stdexcept>
+#include <sys/types.h>
+
+
+static inline void reverse_byes(uint8_t * __restrict s, size_t length)
+{
+    int c, i, j;
+
+    for (i = 0, j = length - 1; i < j; i++, j--)
+    {
+        c = s[i];
+        s[i] = s[j];
+        s[j] = c;
+    }
+}
 
 int64_t encodeStringToI64(const std::string& str) {
     if (str.size() > 7) {
@@ -12,6 +27,61 @@ int64_t encodeStringToI64(const std::string& str) {
     }
 
     int64_t res = 0;
+    uint8_t* __restrict ui8_ptr = reinterpret_cast<uint8_t*>(&res);
+    uint8_t size = str.size();
+
+    memcpy(ui8_ptr, str.c_str(), size);
+    // "reverse" the order of string on little endian machine.
+    reverse_byes(ui8_ptr, sizeof(int64_t));
+    // Lowest byte of Integer stores the size of the string, bit left shiflted by 1 so that we can get
+    // correct size after right shifting by 1
+    memset(ui8_ptr, size << 1, 1);
+    
+
+    res = res >> 1;
+    res &= 0x7FFFFFFFFFFFFFFF;
+    return res;
+}
+
+// int64_t encodeStringToI64(const std::string& str) {
+//     int64_t res;
+//     uint8_t* __restrict ui8_ptr = reinterpret_cast<uint8_t*>(&res);
+//     uint8_t str_size = static_cast<uint8_t>(str.size());
+//     auto str_ptr = str.c_str();
+
+//     // Lowest byte of Integer stores the size of the string, bit left shiflted by 1 so that we can get
+//     // correct size after right shifting by 1
+//     memset(ui8_ptr, str_size << 1, 1);
+    
+//     // "reverse" the order of string on little endian machine.
+//     for (int j = str_size - 1, k = 1; j >= 0; --j, ++k) {
+//         memcpy(ui8_ptr + k, str_ptr + j, 1);
+//     }
+
+//     res = (res >> 1);
+//     res &= 0x7FFFFFFFFFFFFFFF;
+//     return res;
+// }
+
+
+std::string decodeStringFromI64(int64_t val) {
+    auto ui8_ptr = reinterpret_cast<uint8_t*>(&val);
+    int strSize = *ui8_ptr;
+    std::string res;
+    res.reserve(strSize);
+    val = val << 1;
+    for (int i = strSize - 1, j = 0; i >= 0; --i, ++j) {
+        res.push_back(*(ui8_ptr + sizeof(val) - 1 - j));
+    }
+    return res;
+}
+
+__int128_t encodeStringToI128(const std::string& str) {
+    if (str.size() > 15) {
+        throw std::runtime_error("String is too long");
+    }
+
+    __int128_t res = 0;
     auto ui8_ptr = reinterpret_cast<uint8_t*>(&res);
 
     for (size_t i = 0; i < str.size(); ++i) {
@@ -20,21 +90,9 @@ int64_t encodeStringToI64(const std::string& str) {
 
     uint8_t size = str.size();
     memset(ui8_ptr, size << 1, 1);
-    res &= 0x7FFFFFFFFFFFFFFF;
-    return res >> 1;
-}
-
-std::string decodeStringFromI64(int64_t val) {
-    auto ui8_ptr = reinterpret_cast<uint8_t*>(&val);
-    int strSize = *ui8_ptr;
     
-    std::string res;
-    res.reserve(strSize);
-    val = val << 1;
-    for (int i = strSize - 1, j = 0; i >= 0; --i, ++j) {
-        res.push_back(*(ui8_ptr + sizeof(val) - 1 - j));
-    }
-    return res;
+    res &= std::numeric_limits<__int128_t>::max();;
+    return res >> 1;
 }
 
 template<typename T>
