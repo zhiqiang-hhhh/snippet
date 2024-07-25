@@ -31,7 +31,7 @@ def generate_random_data(column, faker):
             return random.randint(1990, 2027)
         return random.randint(0, 100000)
     elif 'VARCHAR' in col_type or 'TEXT' in col_type:
-        if col_name == 'KPI_CODE' or col_name == 'KPI_ID' or col_name == 'FLIGHT_DATE':
+        if col_name == 'KPI_CODE' or col_name == 'KPI_ID' or col_name == 'FLIGHT_DATE' or col_name == 'sequence_id':
             return f"""{random.choice(['A', 'B', 'C'])}"""
         if col_name == 'uuid':
             return faker.uuid4()
@@ -102,7 +102,7 @@ def create_table_and_insert_random_data(table_name, col_name, col_type, ddl="", 
         connection.close()
 
 def main():
-    table_name = "cyb_dwd_sales_week_global_v"
+    table_name = "demo.ods_activity_decision_flat"
     get_table_structure_and_insert_random_data(table_name, num_rows=300)
 
 if __name__ == "__main__":
