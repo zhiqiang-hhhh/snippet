@@ -1,24 +1,23 @@
 import sys
 import os
+import time
 import traceback
 import uuid
-import mysql.connector
-from mysql.connector import Error
 import myprofile as profile
 import logging
 import database
 
 # Configure logging
-logging.basicConfig(level=logging.INFO, format='[%(asctime)s][%(levelname)s][%(filename)s:%(lineno)d] - %(message)s')
+logging.basicConfig(level=logging.DEBUG, format='[%(asctime)s][%(levelname)s][%(filename)s:%(lineno)d] - %(message)s')
 
 
 # List of valid suite names
-VALID_SUITES = ['clickbench', 'tpch']
+VALID_SUITES = ['clickbench', 'tpch_sf1', 'tpch_sf100', 'tpch_sf1000']
 
 def validate_arguments(args):
     if len(args) != 2:
         logging.error("Invalid number of arguments.")
-        raise ValueError("Usage: python multi-process-poc.py [clickbench|tpch]")
+        raise ValueError("Usage: python multi-process-poc.py [clickbench|tpch_sf1|tpch_sf100|tpch_sf1000]")
     
     suits_name = args[1]
     
@@ -33,6 +32,8 @@ def generate_uuid():
     return str(uuid.uuid4())
 
 def get_queries_path(suits_name, modified=False):
+    if (suits_name.startswith('tpch')):
+        suits_name = 'tpch'
     sub_dir = 'modified' if modified else 'origin'
     queries_path = os.path.join('sql', suits_name, sub_dir)
     logging.info(f"Queries path: {queries_path}")
@@ -44,43 +45,28 @@ def read_query_file(query_file_path):
     # logging.info(f"Read queries from file: {query_file_path}, content: {queries}")
     return queries
 
-def execute_query_file(queries, connection):
+def execute_query(query_text, connection):
     cursor = connection.cursor()
-    # for query in queries.striplines():
-    #     query = query.strip()
-    #     if query and query.startswith('SELECT') or query.startswith('USE') or query.startswith('SET'):
-    cursor.execute(queries)
+    cursor.execute(query_text)
+    cursor.fetchall()
     while cursor.nextset():
         # Fetch all results to avoid 'Unread result found' error
         cursor.fetchall()
     connection.commit()
 
-def connect_to_mysql():
-    try:
-        connection = mysql.connector.connect(
-            host='127.0.0.1',
-            user='root',
-            port=6937,
-            password=''
-        )
-        if connection.is_connected():
-            logging.info("Connected to MySQL database")
-            return connection
-    except Error as e:
-        logging.error(f"Error connecting to MySQL: {e}")
-        raise ConnectionError(f"Error connecting to MySQL: {e}")
-
 def main():
     try:
         database.init_database()
         suits_name = validate_arguments(sys.argv)
-        query_file_dir = get_queries_path(suits_name, modified=True)
-        
+        query_file_dir = get_queries_path(suits_name, modified=False)
+
         # list all files in the directory
         query_files_list = os.listdir(query_file_dir)
+        if "clickbench" not in suits_name: 
+            query_files_list = sorted(query_files_list, key=lambda x: int(x[1:-4]))
         logging.info(f"List of files in the directory: {query_files_list}")
         
-        connection = connect_to_mysql()
+        connection = database.get_poc_cluster_conn()
         cursor = connection.cursor()
         cursor.execute("SET enable_profile=true;")
         begin_uuid = generate_uuid()
@@ -90,30 +76,55 @@ def main():
         cursor.execute(f"SELECT '{begin_uuid}'")  # Generate a unique identifier
         cursor.fetchall()
         
-        if (suits_name == 'clickbench'):
-            cursor.execute("USE clickbench")
-        elif (suits_name == 'tpch'):
-            cursor.execute("USE tpch")
+        cursor.execute(f"USE {suits_name}")
+        
+        query_idx = 1
+        
         for file in query_files_list:
             abs_path = os.path.join(query_file_dir, file)
             logging.info(abs_path)
             query_content = read_query_file(abs_path)
-            execute_query_file(query_content, connection)
-            cursor.fetchall()
+            if suits_name == "clickbench":
+                for query in query_content.splitlines():
+                    query = query.strip()
+                    if query and query.startswith('SELECT') or query.startswith('USE') or query.startswith('SET'):
+                        query = query.strip()
+                        time.sleep(1)
+                        logging.info(f"Executing query: {query}")
+                        execute_query(query, connection)
+                        conn_inner = database.get_analyze_cluster_conn()
+                        cursor_inner = conn_inner.cursor()
+                        cursor_inner.execute(f"INSERT INTO poc.query_base VALUES({query_idx}, \"{query}\", '{suits_name}')")
+                        conn_inner.commit()
+                        cursor.fetchall()
+            else:
+                time.sleep(1)
+                execute_query(query_content, connection)
+                conn_inner = database.get_analyze_cluster_conn()
+                cursor_inner = conn_inner.cursor()
+                cursor_inner.execute(f"INSERT INTO poc.query_base VALUES({query_idx}, \"{query_content}\", \"{suits_name}\")")
+                conn_inner.commit()
+                cursor.fetchall()
+            time.sleep(1)
 
         cursor.execute(f"USE demo")
         cursor.execute(f"SELECT '{end_uuid}'")  # Generate a unique identifier
         cursor.fetchall()
-        
-        profile_ids = profile.get_profile_list_by_range("root", "", begin_uuid, end_uuid)
+        # begin_uuid = "6e1151ea-b22d-4620-a795-2352fcf8251c"
+        # end_uuid = "34d74a42-fa40-4e11-8b52-a63e2d8ea09d"
+        profile_ids = profile.get_profile_list_by_range("root", "", begin_uuid, end_uuid, suits_name)
 
         query_idx = 1
         for profile_id in profile_ids:
-            profile_content = profile.get_profile_content("root", "", profile_id)
+            profile_content = profile.get_profile_content("62.234.39.208", 8030, "root", "", profile_id)
             profile.ayalyze_profile(query_idx, profile_content['data']['profile'])
             query_idx += 1
 
-        database.pretty_print_results("SELECT * FROM res_table ORDER BY CAST(REPLACE(query_idx, 'q', '') AS INTEGER)")
+        database.pretty_print_results("SELECT query_idx, query_id, total as total_ms, " +
+                                      "round(avg_ser_deser_sum,2) as ser_cost_ms, " +
+                                      "round((avg_ser_deser_sum / total) * 100, 2) as percentage, " +
+                                      "round(avg_rows_read,2) as rows_read, round(avg_block_mb,2) as block_size_mb " +
+                                      "FROM poc.res_table ORDER BY CAST(REPLACE(query_idx, 'q', '') AS INTEGER)")
     except Exception as e:
         logging.error(f"An error occurred: {traceback.format_exc()}")
     finally:

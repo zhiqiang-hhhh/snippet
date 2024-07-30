@@ -63,7 +63,8 @@ def generate_ddl(table_name, col_name, col_type):
     return ddl
 
 def get_table_structure_and_insert_random_data(table_name, num_rows=100):
-    connection = mysql.connector.connect(user="root", password="", host='10.16.10.8', port=6937)
+    connection = mysql.connector.connect(
+        user="root", password="", host='10.16.10.8', port=6937)
     cursor = connection.cursor()
     faker = Faker()
 

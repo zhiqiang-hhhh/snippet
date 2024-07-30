@@ -7,8 +7,8 @@ import sqlite3
 import logging
 import database
 
-def fetch_query_info(username, password):
-    url = "http://127.0.0.1:5937/rest/v2/manager/query/query_info"  # Replace with the actual URL
+def fetch_query_info(host, port, username, password):
+    url = f"http://{host}:{port}/rest/v2/manager/query/query_info"  # Replace with the actual URL
     try:
         response = requests.get(url, auth=HTTPBasicAuth(username, password))
         response.raise_for_status()  # Raise an HTTPError for bad responses (4xx and 5xx)
@@ -24,8 +24,8 @@ def fetch_query_info(username, password):
         print(f"An error occurred: {req_err}")
     return None
 
-def get_profile_content(username, password, profile_id):
-    url = f"http://127.0.0.1:5937/rest/v2/manager/query/profile/text/{profile_id}"
+def get_profile_content(host, port, username, password, profile_id):
+    url = f"http://{host}:{port}/rest/v2/manager/query/profile/text/{profile_id}"
     try:
         time.sleep(2)
         response = requests.get(url, auth=HTTPBasicAuth(username, password))
@@ -43,41 +43,47 @@ def get_profile_content(username, password, profile_id):
         print(f"An error occurred: {req_err}")
     return None
 
-def store_data_in_sqlite(data):
+def store_data_in_doris(data):
     # Connect to an in-memory SQLite database
-    conn = sqlite3.connect('datail.db')
+    conn = database.get_analyze_cluster_conn()
     cursor = conn.cursor()
     
     # Extract column names and rows
-    # column_names = data['columnNames']
     rows = data['rows']
     logging.info(f"Query info sample {rows[0]}")
+    idx = 1
     for row in rows:
         row = row[:-2]  # Remove the last two element
-        placeholders = ', '.join('?' * len(row))
-        cursor.execute(f"INSERT INTO query_info VALUES ({placeholders})", row)
-    
+        row = [idx] + row
+        placesholders = ', '.join(['%s'] * (len(row)))
+        dml = f"""INSERT INTO poc.query_info(idx, QueryID, FE, Type, Begin, End, Total, Status, User, DB, Sql) VALUES ({placesholders});"""
+        if idx == 1:
+            logging.debug(f"DML:\n {dml}")
+            logging.debug("Row: %s", row)
+        cursor.execute(f"{dml}", row)
+        idx+=1
     conn.commit()
-    logging.info("Data stored in in-memory database successfully.")
     return conn
 
-def get_profile_list_by_range(username, password, begin_uuid, end_uuid):
-    query_info = fetch_query_info(username, password)
+def get_profile_list_by_range(username, password, begin_uuid, end_uuid, database_name):
+    query_info = fetch_query_info("62.234.39.208" , 8030, username, password)
     if query_info and 'data' not in query_info:
         # Throw an exception
         raise Exception("Data not found in query_info")
         
     data = query_info['data']
-    conn = store_data_in_sqlite(data)
+    conn = store_data_in_doris(data)
     cursor = conn.cursor()
     cursor.execute(
-        f"SELECT Query ID, 开始时间, Sql FROM query_info where Sql like '%{begin_uuid}%' or Sql like '%{end_uuid}%' order by 开始时间")
+        f"SELECT QueryID, Begin, Sql FROM poc.query_info where Sql like '%{begin_uuid}%' or Sql like '%{end_uuid}%' order by End")
     res = cursor.fetchall()
     begin_query_id, begin_time = res[0][0], res[0][1]
     end_query_id, end_time = res[1][0], res[1][1]
     logging.info(f"begin_query_uuid\t{begin_query_id}\tbegin_time:\t{begin_time}")
     logging.info(f"end_query_uuid  \t{end_query_id}\tend_time:    \t{end_time}")
-    res = database.pretty_print_results(f"SELECT Query ID, 开始时间, 执行数据库 FROM query_info where 开始时间 >= '{begin_time}' AND 开始时间 <= '{end_time}' AND (执行数据库 = 'clickbench' OR 执行数据库 = 'tpch') order by 开始时间")
+    res = database.pretty_print_results(
+        f"SELECT QueryID, Begin, End, DB FROM poc.query_info " + 
+        f"where Begin >= '{begin_time}' AND End <= '{end_time}' AND (DB = '{database_name}') order by Begin,End")
     logging.info(f"Profile list fetched successfully. Count {len(res)}")
     final_res = []
     for row in res:
@@ -131,8 +137,7 @@ def ayalyze_profile(query_idx, profile_content):
     execution_profile_pattern = re.compile(r'(?=.*Execution)(?=.*Profile)')
     scan_operator_pattern = re.compile(r'OLAP_SCAN_OPERATOR \(id=') 
     vscanner_pattern = re.compile(r'VScanner:')
-    # 定义正则表达式以匹配包含 RowsRead 并且有 (数字) 的行
-    rowsread_pattern = re.compile(r'- RowsRead:.*\(\d+\)')
+    rowsread_pattern = re.compile(r'- RowsRead:.*\d')
     # 定义正则表达式以匹配以 - ScanNodeDeserializationBlockTime: 和数字开头的行
     deser_pattern = re.compile(r'- ScanNodeDeserializationBlockTime: \d+(\.\d+)?')
     ser_pattern = re.compile(r'- ScannerSerializationBlockTime: \d+(\.\d+)?')
@@ -188,8 +193,11 @@ def ayalyze_profile(query_idx, profile_content):
         for i, line in enumerate(lines[segment_b:segment_e]):
             match_rowsread = rowsread_pattern.search(line)
             if match_rowsread:
-                rows_read = int(line.split('(')[1].split(')')[0])
-                if (rows_read == 0):
+                if '(' in line:
+                    rows_read = int(line.split('(')[1].split(')')[0])
+                else:   
+                    rows_read = int(line.split(':')[1])
+                if (rows_read < 100):
                     valid = False
                     break
                 continue
@@ -228,22 +236,29 @@ def ayalyze_profile(query_idx, profile_content):
 
     # logging.info("ScanOperator in total %d,", len(analyze_result))
 
-    conn = sqlite3.connect('datail.db')
+    conn = database.get_analyze_cluster_conn()
     cursor = conn.cursor()
-    cursor.execute(f"CREATE TABLE q{query_idx} (query_id TEXT, total INT, sql_content TEXT, rows_read INT, column_count INT, block_mb INT, serialized_mb INT, serialization_ms DOUBLE, deserialization_ms DOUBLE)")
-    # logging.info("Analyze result sample %s", analyze_result[:10])
+    cursor.execute("USE poc")
+    cursor.execute(
+        f"CREATE TABLE poc.q{query_idx} (" +
+         "query_id VARCHAR, total_ms INT, sql_content TEXT, rows_read INT, " +
+         "column_count INT, block_mb INT, serialized_mb INT, serialization_ms DOUBLE, deserialization_ms DOUBLE)" +
+         " duplicate key (query_id) distributed by hash(total_ms) buckets 3 " +
+         " properties(\"replication_num\"=\"1\")")
     for row in analyze_result:
-        placeholders = ', '.join('?' * len(row))
-        cursor.execute(f"INSERT INTO q{query_idx} VALUES ({placeholders})", row)
+        placeholders = ', '.join(["%s"] * len(row))
+        cursor.execute(f"INSERT INTO poc.q{query_idx} VALUES ({placeholders})", row)
         cursor.execute("COMMIT")
 
     cursor.execute(
-        "INSERT INTO res_table " +
-        f"SELECT \'q{query_idx}\',\'{query_id}\', avg(TMP.rows_read) as avg_rows_read, avg(TMP.block_mb) as avg_block_mb, avg(TMP.serialized_mb) as avg_sered_mb, " +
+        "INSERT INTO poc.res_table " +
+        f"SELECT \'q{query_idx}\',\'{query_id}\', " + 
+        "avg(TMP.total_ms) as total_ms, avg(TMP.rows_read) as avg_rows_read, avg(TMP.block_mb) as avg_block_mb, avg(TMP.serialized_mb) as avg_sered_mb, " +
         "avg(TMP.avg1) as avg_ser_ms, avg(TMP.avg2) as avg_deser_ms, avg(TMP.avg3) as avg_ser_deser_sum FROM (" +
-        "SELECT rows_read, block_mb, serialized_mb," +
+        "SELECT avg(total_ms) as total_ms, avg(rows_read) as rows_read, avg(block_mb) as block_mb, avg(serialized_mb) as serialized_mb," +
         " avg(serialization_ms) as avg1, avg(deserialization_ms) as avg2," +
         " avg(serialization_ms + deserialization_ms) as avg3" +
-        f" FROM q{query_idx} WHERE block_mb > 0 AND serialized_mb > 0" +
-        " GROUP BY rows_read, block_mb, serialized_mb order by rows_read ) AS TMP")
+        f" FROM poc.q{query_idx} WHERE block_mb > 0 AND serialized_mb > 0" +
+        " order by rows_read ) AS TMP")
+
     cursor.execute("COMMIT")
