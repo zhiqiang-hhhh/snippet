@@ -56,7 +56,8 @@ def store_data_in_doris(data):
         row = row[:-2]  # Remove the last two element
         row = [idx] + row
         placesholders = ', '.join(['%s'] * (len(row)))
-        dml = f"""INSERT INTO poc.query_info(idx, QueryID, FE, Type, Begin, End, Total, Status, User, DB, Sql) VALUES ({placesholders});"""
+        dml = f"""INSERT INTO poc.query_info(idx, QueryID, FE, Type, Begin, End, Total, Status, User, Catalog, DB, Sql) VALUES ({placesholders});"""
+        # dml = f"""INSERT INTO poc.query_info(idx, QueryID, FE, Type, Begin, End, Total, Status, User, DB, Sql) VALUES ({placesholders});"""
         if idx == 1:
             logging.debug(f"DML:\n {dml}")
             logging.debug("Row: %s", row)
@@ -66,6 +67,7 @@ def store_data_in_doris(data):
     return conn
 
 def get_profile_list_by_range(username, password, begin_uuid, end_uuid, database_name):
+    # query_info = fetch_query_info("127.0.0.1" , 5937, username, password)
     query_info = fetch_query_info("62.234.39.208" , 8030, username, password)
     if query_info and 'data' not in query_info:
         # Throw an exception
@@ -133,7 +135,7 @@ def parse_to_milliseconds(duration_str):
     
     return total_milliseconds
 
-def ayalyze_profile(query_idx, profile_content):
+def ayalyze_profile(profile_content):
     execution_profile_pattern = re.compile(r'(?=.*Execution)(?=.*Profile)')
     scan_operator_pattern = re.compile(r'OLAP_SCAN_OPERATOR \(id=') 
     vscanner_pattern = re.compile(r'VScanner:')
@@ -164,6 +166,7 @@ def ayalyze_profile(query_idx, profile_content):
             for j, line in enumerate(lines[i:]):
                 if scan_operator_pattern.search(line.strip()):
                     scan_operator_offset.append(i+j)
+                    # logging.debug(f"Scan operator found {line}")
                 if vscanner_pattern.search(line):
                     scanner_offset.append(i+j)
             break
@@ -172,7 +175,7 @@ def ayalyze_profile(query_idx, profile_content):
         raise ValueError("Scan operator and scanner count mismatch")
 
     logging.info("Processing profile %s", query_id)
-    
+    # logging.debug("Scan operator offset %s", scan_operator_offset)
     total = len(scan_operator_offset)
     # 确保不越界
     scan_operator_offset.append(len(lines))
@@ -231,34 +234,43 @@ def ayalyze_profile(query_idx, profile_content):
                 except ValueError as e:
                     valid = False
                     break
-        if valid or rows_read > 0:
-            analyze_result.append([query_id, total_time_ms, sql, rows_read, col_count, block_mb, serialized_mb, ser_time, deser_time])        
+        
+        analyze_result.append([query_id, total_time_ms, sql, rows_read, col_count, block_mb, serialized_mb, ser_time, deser_time])        
 
-    # logging.info("ScanOperator in total %d,", len(analyze_result))
+    return analyze_result
 
+def store_ayalyze_result(query_idx, dbname, analyze_result):
+    logging.debug(f"QueryIdx {query_idx} ScanOperator in total {len(analyze_result)},")
     conn = database.get_analyze_cluster_conn()
     cursor = conn.cursor()
-    cursor.execute("USE poc")
+    
+    cursor.execute(f"USE {database.AYALYZE_DATABASE_NAME}")
     cursor.execute(
-        f"CREATE TABLE poc.q{query_idx} (" +
-         "query_id VARCHAR, total_ms INT, sql_content TEXT, rows_read INT, " +
+        f"CREATE TABLE {dbname}_{query_idx} (" +
+         "db VARCHAR, query_idx VARCHAR, query_id VARCHAR, total_ms INT, sql_content TEXT, rows_read INT, " +
          "column_count INT, block_mb INT, serialized_mb INT, serialization_ms DOUBLE, deserialization_ms DOUBLE)" +
-         " duplicate key (query_id) distributed by hash(total_ms) buckets 3 " +
+         " duplicate key (db, query_idx, query_id) distributed by hash(total_ms) buckets 3 " +
          " properties(\"replication_num\"=\"1\")")
+    
     for row in analyze_result:
+        row = [dbname, query_idx] + row
         placeholders = ', '.join(["%s"] * len(row))
-        cursor.execute(f"INSERT INTO poc.q{query_idx} VALUES ({placeholders})", row)
+        cursor.execute(f"INSERT INTO {dbname}_{query_idx} VALUES ({placeholders})", row)
         cursor.execute("COMMIT")
 
     cursor.execute(
-        "INSERT INTO poc.res_table " +
-        f"SELECT \'q{query_idx}\',\'{query_id}\', " + 
-        "avg(TMP.total_ms) as total_ms, avg(TMP.rows_read) as avg_rows_read, avg(TMP.block_mb) as avg_block_mb, avg(TMP.serialized_mb) as avg_sered_mb, " +
-        "avg(TMP.avg1) as avg_ser_ms, avg(TMP.avg2) as avg_deser_ms, avg(TMP.avg3) as avg_ser_deser_sum FROM (" +
-        "SELECT avg(total_ms) as total_ms, avg(rows_read) as rows_read, avg(block_mb) as block_mb, avg(serialized_mb) as serialized_mb," +
-        " avg(serialization_ms) as avg1, avg(deserialization_ms) as avg2," +
-        " avg(serialization_ms + deserialization_ms) as avg3" +
-        f" FROM poc.q{query_idx} WHERE block_mb > 0 AND serialized_mb > 0" +
-        " order by rows_read ) AS TMP")
-
+        "INSERT INTO res_table " +
+        "SELECT db, query_idx, query_id, total_ms, count(*) as scan_node_cnt, " + 
+        "round(min(serialization_ms + deserialization_ms), 2) as min_ser_ms, " +
+        "round(max(serialization_ms + deserialization_ms), 2) as max_ser_ms, " +
+        "PERCENTILE(serialization_ms + deserialization_ms, 0.5) as p50_ser_ms, " +
+        "round(min(rows_read), 2) as min_rows_read, " +
+        "round(max(rows_read), 2) as max_rows_read, " +
+        "PERCENTILE(rows_read, 0.5) as p50_block_mb, " +
+        "round(sum(rows_read), 2) as sum_rows_read, " +
+        "round(min(block_mb), 2) as min_block_mb, " +
+        "round(max(block_mb), 2) as max_block_mb, " +
+        "PERCENTILE(block_mb, 0.5) as p50_block_mb, " +
+        "round(sum(block_mb), 2) as sum_block_mb " +
+        f" FROM {dbname}_{query_idx} GROUP BY db, query_idx, query_id, total_ms;")
     cursor.execute("COMMIT")

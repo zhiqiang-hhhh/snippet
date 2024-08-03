@@ -56,7 +56,8 @@ def execute_query(query_text, connection):
 
 def main():
     try:
-        database.init_database()
+        # database.init_base_database()
+        database.init_poc_database()
         suits_name = validate_arguments(sys.argv)
         query_file_dir = get_queries_path(suits_name, modified=False)
 
@@ -65,7 +66,7 @@ def main():
         if "clickbench" not in suits_name: 
             query_files_list = sorted(query_files_list, key=lambda x: int(x[1:-4]))
         logging.info(f"List of files in the directory: {query_files_list}")
-        
+        # query_files_list = query_files_list[:2]
         connection = database.get_poc_cluster_conn()
         cursor = connection.cursor()
         cursor.execute("SET enable_profile=true;")
@@ -90,7 +91,7 @@ def main():
                     if query and query.startswith('SELECT') or query.startswith('USE') or query.startswith('SET'):
                         query = query.strip()
                         time.sleep(1)
-                        logging.info(f"Executing query: {query}")
+                        logging.info(f"Executing query {query_idx}:{query}")
                         execute_query(query, connection)
                         conn_inner = database.get_analyze_cluster_conn()
                         cursor_inner = conn_inner.cursor()
@@ -110,21 +111,19 @@ def main():
         cursor.execute(f"USE demo")
         cursor.execute(f"SELECT '{end_uuid}'")  # Generate a unique identifier
         cursor.fetchall()
-        # begin_uuid = "6e1151ea-b22d-4620-a795-2352fcf8251c"
-        # end_uuid = "34d74a42-fa40-4e11-8b52-a63e2d8ea09d"
+        # begin_uuid = "6bc5f28e-199e-4eca-86fa-a5b57f1de0f7"
+        # end_uuid = "760a4825-e856-434c-8f15-5630cb7aff6b"
         profile_ids = profile.get_profile_list_by_range("root", "", begin_uuid, end_uuid, suits_name)
 
         query_idx = 1
         for profile_id in profile_ids:
+            # profile_content = profile.get_profile_content("127.0.0.1", 5937, "root", "", profile_id)
             profile_content = profile.get_profile_content("62.234.39.208", 8030, "root", "", profile_id)
-            profile.ayalyze_profile(query_idx, profile_content['data']['profile'])
+            res = profile.ayalyze_profile(profile_content['data']['profile'])
+            profile.store_ayalyze_result(query_idx, suits_name, res)
             query_idx += 1
 
-        database.pretty_print_results("SELECT query_idx, query_id, total as total_ms, " +
-                                      "round(avg_ser_deser_sum,2) as ser_cost_ms, " +
-                                      "round((avg_ser_deser_sum / total) * 100, 2) as percentage, " +
-                                      "round(avg_rows_read,2) as rows_read, round(avg_block_mb,2) as block_size_mb " +
-                                      "FROM poc.res_table ORDER BY CAST(REPLACE(query_idx, 'q', '') AS INTEGER)")
+        database.pretty_print_results("SELECT * FROM poc.res_table ORDER BY db, cast(query_idx as Int); ")
     except Exception as e:
         logging.error(f"An error occurred: {traceback.format_exc()}")
     finally:
