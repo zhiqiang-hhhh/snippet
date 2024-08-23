@@ -27,7 +27,7 @@ def fetch_query_info(host, port, username, password):
 def get_profile_content(host, port, username, password, profile_id):
     url = f"http://{host}:{port}/rest/v2/manager/query/profile/text/{profile_id}"
     try:
-        time.sleep(2)
+        # time.sleep()
         response = requests.get(url, auth=HTTPBasicAuth(username, password))
         response.raise_for_status()  # Raise an HTTPError for bad responses (4xx and 5xx)
         # return response.text()
@@ -67,8 +67,8 @@ def store_data_in_doris(data):
     return conn
 
 def get_profile_list_by_range(username, password, begin_uuid, end_uuid, database_name):
-    # query_info = fetch_query_info("127.0.0.1" , 5937, username, password)
-    query_info = fetch_query_info("62.234.39.208" , 8030, username, password)
+    query_info = fetch_query_info("127.0.0.1" , 5937, username, password)
+    # query_info = fetch_query_info("62.234.39.208" , 8030, username, password)
     if query_info and 'data' not in query_info:
         # Throw an exception
         raise Exception("Data not found in query_info")

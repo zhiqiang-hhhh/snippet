@@ -29,11 +29,11 @@ def get_analyze_cluster_conn() :
         user="root", password="", host='127.0.0.1', port=6937)
     return conn
 
-def get_poc_cluster_conn():
-    # return get_analyze_cluster_conn()
-    conn = mysql.connector.connect(
-        user="root", password="", host='62.234.39.208', port=9030)
-    return conn
+# def get_poc_cluster_conn():
+#     # return get_analyze_cluster_conn()
+#     conn = mysql.connector.connect(
+#         user="root", password="", host='62.234.39.208', port=9030)
+#     return conn
 
 def init_base_database():
     conn = get_analyze_cluster_conn()

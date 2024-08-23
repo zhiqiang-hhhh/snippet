@@ -67,7 +67,8 @@ def main():
             query_files_list = sorted(query_files_list, key=lambda x: int(x[1:-4]))
         logging.info(f"List of files in the directory: {query_files_list}")
         # query_files_list = query_files_list[:2]
-        connection = database.get_poc_cluster_conn()
+        # connection = database.get_poc_cluster_conn()
+        connection = database.get_analyze_cluster_conn()
         cursor = connection.cursor()
         cursor.execute("SET enable_profile=true;")
         begin_uuid = generate_uuid()
