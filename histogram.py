@@ -7,6 +7,7 @@ def get_conn() :
 
 sql = 'SELECT histogram(k7, 5) FROM agg_func_db.baseall'
 # sql = 'select histogram(k5, 5) from agg_func_db.baseall where k5 is null or k5 = 243.325'
+sql = "SELECT histogram(k0) FROM agg_func_db.baseall"
 conn = get_conn()
 cursor = conn.cursor()
 
@@ -15,7 +16,7 @@ idx = 1
 while True:
     cursor.execute(sql)
     res = cursor.fetchall()
-    if "\"num_buckets\":5" not in res[0][0]:
+    if "\"num_buckets\":0" not in res[0][0]:
     # if """"num_buckets":1""" not in res[0][0]:
         print(f"idx{idx}\n{res}")
         break
