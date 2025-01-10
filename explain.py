@@ -1,59 +1,18 @@
-import subprocess
 import mysql.connector
-from tabulate import tabulate
+from mysql.connector import Error
 
-def get_conn():
-    conn = mysql.connector.connect(
-        user="root",
-        password="",
-        host="62.234.39.208",
-        port=9030
-    )
-    return conn
+def connect_and_explain_queries():
+    # MySQL 数据库连接配置
+    db_config = {
+        'host': 'localhost',  # 数据库主机
+        'user': 'root',  # 数据库用户名
+        'password': '',  # 数据库密码
+        'database': 'tpch',  # 数据库名称
+        'port': 6937  # 数据库端口
+    }
 
-conn = get_conn()
-cursor = conn.cursor()
-cursor.execute("UNSET GLOBAL VARIABLE ALL;")
-cursor.execute("SET GLOBAL enable_profile=false;")
-# cursor.execute("SET GLOBAL num_scanner_threads=0;")
-_ = cursor.fetchall()
-
-def run_shell_command(command):
-    try:
-        # 执行命令并捕获输出
-        result = subprocess.run(command, shell=True, universal_newlines=True, capture_output=True)
-
-        # 检查返回码是否为0（成功）
-        if result.returncode == 0:
-            return result.stdout
-        else:
-            print("Command failed with return code:", result.returncode)
-            print("Error Output:")
-            print(result.stderr)
-            return None
-    except Exception as e:
-        print("An error occurred while running the command:", str(e))
-        return None
-
-def parse_benchmark_output(output):
-    """解析 mysqlslap 的基准测试输出为字典"""
-    metrics = {}
-    lines = output.splitlines()
-    for line in lines:
-        if "Average number of seconds" in line:
-            metrics["Average Time"] = float(line.split(":")[-1].strip().split()[0])
-        elif "Minimum number of seconds" in line:
-            metrics["Minimum Time"] = float(line.split(":")[-1].strip().split()[0])
-        elif "Maximum number of seconds" in line:
-            metrics["Maximum Time"] = float(line.split(":")[-1].strip().split()[0])
-        elif "Number of clients running queries" in line:
-            metrics["Clients"] = int(line.split(":")[-1].strip())
-        elif "Average number of queries per client" in line:
-            metrics["Queries per Client"] = float(line.split(":")[-1].strip())
-    return metrics
-
-def execute_tpch_queries():
-    tpch_queries = [
+    # 要执行 EXPLAIN 的查询列表
+    queries = [
         "select l_returnflag, l_linestatus, sum(l_quantity) as sum_qty, sum(l_extendedprice) as sum_base_price, sum(l_extendedprice * (1 - l_discount)) as sum_disc_price, sum(l_extendedprice * (1 - l_discount) * (1 + l_tax)) as sum_charge, avg(l_quantity) as avg_qty, avg(l_extendedprice) as avg_price, avg(l_discount) as avg_disc, count(*) as count_order from lineitem where l_shipdate <= date '1998-12-01' - interval '90' day group by l_returnflag, l_linestatus order by l_returnflag, l_linestatus;",
         "select s_acctbal, s_name, n_name, p_partkey, p_mfgr, s_address, s_phone, s_comment from part, supplier, partsupp, nation, region where p_partkey = ps_partkey and s_suppkey = ps_suppkey and p_size = 15 and p_type like '%BRASS' and s_nationkey = n_nationkey and n_regionkey = r_regionkey and r_name = 'EUROPE' and ps_supplycost = ( select min(ps_supplycost) from partsupp, supplier, nation, region where p_partkey = ps_partkey and s_suppkey = ps_suppkey and s_nationkey = n_nationkey and n_regionkey = r_regionkey and r_name = 'EUROPE' ) order by s_acctbal desc, n_name, s_name, p_partkey limit 100;",
         "select l_orderkey, sum(l_extendedprice * (1 - l_discount)) as revenue, o_orderdate, o_shippriority from customer, orders, lineitem where c_mktsegment = 'BUILDING' and c_custkey = o_custkey and l_orderkey = o_orderkey and o_orderdate < date '1995-03-15' and l_shipdate > date '1995-03-15' group by l_orderkey, o_orderdate, o_shippriority order by revenue desc, o_orderdate limit 10;",
@@ -78,49 +37,43 @@ def execute_tpch_queries():
         "select cntrycode, count(*) as numcust, sum(c_acctbal) as totacctbal from ( select substring(c_phone, 1, 2) as cntrycode, c_acctbal from customer where substring(c_phone, 1, 2) in ('13', '31', '23', '29', '30', '18', '17') and c_acctbal > ( select avg(c_acctbal) from customer where c_acctbal > 0.00 and substring(c_phone, 1, 2) in ('13', '31', '23', '29', '30', '18', '17') ) and not exists ( select * from orders where o_custkey = c_custkey ) ) as custsale group by cntrycode order by cntrycode;",
     ]
 
-    results = []
+    try:
+        # 连接到 MySQL 数据库
+        connection = mysql.connector.connect(**db_config)
 
-    for i, query in enumerate(tpch_queries, 1):
-        print(f"Running TPCH Query {i}...")
-        command = (
-            "mysqlslap -h62.234.39.208 -uroot -P9030 --create-schema=tpch_sf100 -c 10 -i 10 "
-            f"-q \"{query}\""
-        )
-        output = run_shell_command(command)
-        if output:
-            metrics = parse_benchmark_output(output)
-            results.append({"Query": i, "Metrics": metrics})
+        if connection.is_connected():
+            print("成功连接到数据库")
+            cursor = connection.cursor()
 
-    return results
+            # 打开文件以保存 EXPLAIN 结果
+            with open("explain_results.txt", "w") as file:
+                for query in queries:
+                    file.write(f"Query: {query}\n")
+                    try:
+                        # 执行 EXPLAIN
+                        cursor.execute(f"EXPLAIN {query}")
+                        results = cursor.fetchall()
 
-# 执行所有 TPCH 查询
-benchmark_results = execute_tpch_queries()
+                        # 获取列名
+                        column_names = [desc[0] for desc in cursor.description]
+                        file.write("\t".join(column_names) + "\n")
 
-# 将结果以表格形式展示
-data = []
-headers = ["Query", "Average Time", "Minimum Time", "Maximum Time", "Clients", "Queries per Client"]
+                        # 写入结果
+                        for row in results:
+                            file.write("\t".join(str(value) for value in row) + "\n")
+                        file.write("\n")
+                    except Error as e:
+                        file.write(f"Error explaining query: {e}\n\n")
 
-for result in benchmark_results:
-    row = [
-        result["Query"],
-        result["Metrics"].get("Average Time", "N/A"),
-        result["Metrics"].get("Minimum Time", "N/A"),
-        result["Metrics"].get("Maximum Time", "N/A"),
-        result["Metrics"].get("Clients", "N/A"),
-        result["Metrics"].get("Queries per Client", "N/A"),
-    ]
-    data.append(row)
+            print("EXPLAIN 结果已保存到 explain_results.txt")
 
-# 计算每一列的平均值
-average_row = ["Average"]
-for col in range(1, len(headers)):
-    col_values = [row[col] for row in data if isinstance(row[col], (int, float))]
-    if col_values:
-        average_value = sum(col_values) / len(col_values)
-        average_row.append(average_value)
-    else:
-        average_row.append("N/A")
+    except Error as e:
+        print(f"数据库连接错误: {e}")
+    finally:
+        # 确保关闭数据库连接
+        if connection.is_connected():
+            connection.close()
+            print("数据库连接已关闭")
 
-data.append(average_row)
-
-print(tabulate(data, headers=headers, tablefmt="grid"))
+if __name__ == "__main__":
+    connect_and_explain_queries()
