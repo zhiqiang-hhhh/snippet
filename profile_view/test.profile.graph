@@ -1,0 +1,88 @@
+// Query Fragment Tree
+digraph {
+	rankdir=BT
+	node [shape=box style=rounded]
+	graph [nodesep=0.1 ranksep=0.3]
+	subgraph cluster_0 {
+		color=blue label="Fragment 0" margin=8 pad=0.2 style=rounded
+		f0_p0 [label="Pipeline 0
+  RESULT_SINK_OPERATOR
+  EXCHANGE_OPERATOR (id=4)" margin=0.1]
+	}
+	subgraph level_0 {
+		rank=same
+	}
+	subgraph cluster_1 {
+		color=blue label="Fragment 1" margin=8 pad=0.2 style=rounded
+		f1_p1 [label="Pipeline 1
+  LOCAL_EXCHANGE_SINK_OPERATOR
+  SORT_OPERATOR (id=3)" margin=0.1]
+		f1_p2 [label="Pipeline 2
+  SORT_SINK_OPERATOR
+  LOCAL_EXCHANGE_OPERATOR" margin=0.1]
+		f1_p3 [label="Pipeline 3
+  LOCAL_EXCHANGE_SINK_OPERATOR
+  ANALYTIC_EVAL_OPERATOR (id=2)" margin=0.1]
+		f1_p4 [label="Pipeline 4
+  ANALYTIC_EVAL_SINK_OPERATOR
+  SORT_OPERATOR (id=1)" margin=0.1]
+		f1_p5 [label="Pipeline 5
+  SORT_SINK_OPERATOR
+  LOCAL_EXCHANGE_OPERATOR" margin=0.1]
+		f1_p6 [label="Pipeline 6
+  LOCAL_EXCHANGE_SINK_OPERATOR
+  LOCAL_EXCHANGE_OPERATOR" margin=0.1]
+		f1_p7 [label="Pipeline 7
+  LOCAL_EXCHANGE_SINK_OPERATOR
+  OLAP_SCAN_OPERATOR (id=0)" margin=0.1]
+		f1_p0 [label="Pipeline 0
+(SINK)
+  DATA_STREAM_SINK_OPERATOR (dest_id=4)
+  LOCAL_EXCHANGE_OPERATOR" margin=0.1]
+		{
+			{
+				rank=0
+				f1_p1
+			}
+			{
+				rank=1
+				f1_p2
+			}
+			{
+				rank=2
+				f1_p3
+			}
+			{
+				rank=3
+				f1_p4
+			}
+			{
+				rank=4
+				f1_p5
+			}
+			{
+				rank=5
+				f1_p6
+			}
+			{
+				rank=6
+				f1_p7
+			}
+			{
+				rank=7
+				f1_p0
+			}
+			f1_p1 -> f1_p2 [dir=none style=invis weight=100]
+			f1_p2 -> f1_p3 [dir=none style=invis weight=100]
+			f1_p3 -> f1_p4 [dir=none style=invis weight=100]
+			f1_p4 -> f1_p5 [dir=none style=invis weight=100]
+			f1_p5 -> f1_p6 [dir=none style=invis weight=100]
+			f1_p6 -> f1_p7 [dir=none style=invis weight=100]
+			f1_p7 -> f1_p0 [dir=none style=invis weight=100]
+		}
+	}
+	subgraph level_1 {
+		rank=same
+	}
+	f1_p0 -> f0_p0 [label=sink lhead=cluster_0 ltail=cluster_1]
+}

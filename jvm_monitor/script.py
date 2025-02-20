@@ -64,7 +64,8 @@ def main(pid):
             for instances, size, class_name in matching_objects:
                 logging.info(f"{class_name}: {instances} instances, {size} bytes")
             
-            with open('/mnt/disk1/hezhiqiang/Code/snippet/jvm_monitor/output.txt', 'w') as f:
+            # 改文件目录
+            with open('/mnt/disk4/hezhiqiang/Code/snippet/jvm_monitor/output.txt', 'w') as f:
                 f.write("\nTop 20 objects by size:\n")
                 for instances, size, class_name in top_20:
                     f.write(f"{class_name}: {instances} instances, {size} bytes\n")

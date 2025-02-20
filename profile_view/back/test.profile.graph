@@ -1,0 +1,302 @@
+// Query Fragment Tree
+digraph {
+	rankdir=BT
+	node [shape=box style=rounded]
+	graph [nodesep=0.1 ranksep=0.3]
+	subgraph cluster_0 {
+		color=blue label="Fragment 0" margin=8 pad=0.2 style=rounded
+		f0_p0 [label="Pipeline 0
+  RESULT_SINK_OPERATOR
+  EXCHANGE_OPERATOR (id=22)" margin=0.1]
+	}
+	subgraph level_0 {
+		rank=same
+	}
+	subgraph cluster_1 {
+		color=blue label="Fragment 1" margin=8 pad=0.2 style=rounded
+		f1_p3 [label="Pipeline 3
+  LOCAL_EXCHANGE_SINK_OPERATOR
+  HASH_JOIN_OPERATOR (id=20)
+  EXCHANGE_OPERATOR (id=19)" margin=0.1]
+		f1_p4 [label="Pipeline 4
+  HASH_JOIN_SINK_OPERATOR
+  EXCHANGE_OPERATOR (id=17)" margin=0.1]
+		f1_p1 [label="Pipeline 1
+  LOCAL_EXCHANGE_SINK_OPERATOR
+  SORT_OPERATOR (id=21)" margin=0.1]
+		f1_p2 [label="Pipeline 2
+  SORT_SINK_OPERATOR
+  LOCAL_EXCHANGE_OPERATOR" margin=0.1]
+		f1_p0 [label="Pipeline 0
+(SINK)
+  DATA_STREAM_SINK_OPERATOR (dest_id=22)
+  LOCAL_EXCHANGE_OPERATOR" margin=0.1]
+		{
+			{
+				rank=0
+				f1_p3
+			}
+			{
+				rank=1
+				f1_p4
+			}
+			{
+				rank=2
+				f1_p1
+			}
+			{
+				rank=3
+				f1_p2
+			}
+			{
+				rank=4
+				f1_p0
+			}
+			f1_p3 -> f1_p4 [dir=none style=invis weight=100]
+			f1_p4 -> f1_p1 [dir=none style=invis weight=100]
+			f1_p1 -> f1_p2 [dir=none style=invis weight=100]
+			f1_p2 -> f1_p0 [dir=none style=invis weight=100]
+		}
+	}
+	subgraph level_1 {
+		rank=same
+	}
+	subgraph cluster_2 {
+		color=blue label="Fragment 2" margin=8 pad=0.2 style=rounded
+		f2_p1 [label="Pipeline 1
+  LOCAL_EXCHANGE_SINK_OPERATOR
+  OLAP_SCAN_OPERATOR (id=18)" margin=0.1]
+		f2_p0 [label="Pipeline 0
+(SINK)
+  DATA_STREAM_SINK_OPERATOR (dest_id=19)
+  LOCAL_EXCHANGE_OPERATOR" margin=0.1]
+		{
+			{
+				rank=0
+				f2_p1
+			}
+			{
+				rank=1
+				f2_p0
+			}
+			f2_p1 -> f2_p0 [dir=none style=invis weight=100]
+		}
+	}
+	subgraph cluster_3 {
+		color=blue label="Fragment 3" margin=8 pad=0.2 style=rounded
+		f3_p2 [label="Pipeline 2
+  LOCAL_EXCHANGE_SINK_OPERATOR
+  EXCHANGE_OPERATOR (id=14)" margin=0.1]
+		f3_p3 [label="Pipeline 3
+  HASH_JOIN_SINK_OPERATOR
+  EXCHANGE_OPERATOR (id=11)" margin=0.1]
+		f3_p4 [label="Pipeline 4
+  HASH_JOIN_SINK_OPERATOR
+  EXCHANGE_OPERATOR (id=13)" margin=0.1]
+		f3_p1 [label="Pipeline 1
+  LOCAL_EXCHANGE_SINK_OPERATOR
+  HASH_JOIN_OPERATOR (id=15)
+  LOCAL_EXCHANGE_OPERATOR" margin=0.1]
+		f3_p0 [label="Pipeline 0
+(SINK)
+  DATA_STREAM_SINK_OPERATOR (dest_id=17)
+  HASH_JOIN_OPERATOR (id=16)
+  LOCAL_EXCHANGE_OPERATOR" margin=0.1]
+		{
+			{
+				rank=0
+				f3_p2
+			}
+			{
+				rank=1
+				f3_p3
+			}
+			{
+				rank=2
+				f3_p4
+			}
+			{
+				rank=3
+				f3_p1
+			}
+			{
+				rank=4
+				f3_p0
+			}
+			f3_p2 -> f3_p3 [dir=none style=invis weight=100]
+			f3_p3 -> f3_p4 [dir=none style=invis weight=100]
+			f3_p4 -> f3_p1 [dir=none style=invis weight=100]
+			f3_p1 -> f3_p0 [dir=none style=invis weight=100]
+		}
+	}
+	subgraph level_2 {
+		rank=same
+	}
+	subgraph cluster_4 {
+		color=blue label="Fragment 4" margin=8 pad=0.2 style=rounded
+		f4_p1 [label="Pipeline 1
+  LOCAL_EXCHANGE_SINK_OPERATOR
+  OLAP_SCAN_OPERATOR (id=12)" margin=0.1]
+		f4_p0 [label="Pipeline 0
+(SINK)
+  DATA_STREAM_SINK_OPERATOR (dest_id=13)
+  LOCAL_EXCHANGE_OPERATOR" margin=0.1]
+		{
+			{
+				rank=0
+				f4_p1
+			}
+			{
+				rank=1
+				f4_p0
+			}
+			f4_p1 -> f4_p0 [dir=none style=invis weight=100]
+		}
+	}
+	subgraph cluster_5 {
+		color=blue label="Fragment 5" margin=8 pad=0.2 style=rounded
+		f5_p1 [label="Pipeline 1
+  AGGREGATION_SINK_OPERATOR
+  EXCHANGE_OPERATOR (id=9)" margin=0.1]
+		f5_p0 [label="Pipeline 0
+(SINK)
+  DATA_STREAM_SINK_OPERATOR (dest_id=11)
+  AGGREGATION_OPERATOR (id=10)" margin=0.1]
+		{
+			{
+				rank=0
+				f5_p1
+			}
+			{
+				rank=1
+				f5_p0
+			}
+			f5_p1 -> f5_p0 [dir=none style=invis weight=100]
+		}
+	}
+	subgraph cluster_7 {
+		color=blue label="Fragment 7" margin=8 pad=0.2 style=rounded
+		f7_p1 [label="Pipeline 1
+  AGGREGATION_SINK_OPERATOR
+  EXCHANGE_OPERATOR (id=5)" margin=0.1]
+		f7_p0 [label="Pipeline 0
+  MULTI_CAST_DATA_STREAM_SINK_OPERATOR (dest_id=7,14,)
+  AGGREGATION_OPERATOR (id=6)" margin=0.1]
+		f7_p2 [label="Pipeline 2
+(SINK)
+  DATA_STREAM_SINK_OPERATOR (dest_id=7)
+  MULTI_CAST_DATA_STREAM_SOURCE_OPERATOR" margin=0.1]
+		f7_p3 [label="Pipeline 3
+(SINK)
+  DATA_STREAM_SINK_OPERATOR (dest_id=14)
+  MULTI_CAST_DATA_STREAM_SOURCE_OPERATOR" margin=0.1]
+		{
+			{
+				rank=0
+				f7_p1
+			}
+			{
+				rank=1
+				f7_p0
+			}
+			{
+				rank=2
+				f7_p2
+			}
+			{
+				rank=3
+				f7_p3
+			}
+			f7_p1 -> f7_p0 [dir=none style=invis weight=100]
+			f7_p0 -> f7_p2 [dir=none style=invis weight=100]
+			f7_p2 -> f7_p3 [dir=none style=invis weight=100]
+		}
+	}
+	subgraph level_3 {
+		rank=same
+	}
+	subgraph cluster_6 {
+		color=blue label="Fragment 6" margin=8 pad=0.2 style=rounded
+		f6_p0 [label="Pipeline 0
+(SINK)
+  DATA_STREAM_SINK_OPERATOR (dest_id=9)
+  STREAMING_AGGREGATION_OPERATOR (id=8)
+  EXCHANGE_OPERATOR (id=7)" margin=0.1]
+	}
+	subgraph cluster_8 {
+		color=blue label="Fragment 8" margin=8 pad=0.2 style=rounded
+		f8_p3 [label="Pipeline 3
+  LOCAL_EXCHANGE_SINK_OPERATOR
+  EXCHANGE_OPERATOR (id=1)" margin=0.1]
+		f8_p1 [label="Pipeline 1
+  LOCAL_EXCHANGE_SINK_OPERATOR
+  OLAP_SCAN_OPERATOR (id=2)" margin=0.1]
+		f8_p2 [label="Pipeline 2
+  HASH_JOIN_SINK_OPERATOR
+  LOCAL_EXCHANGE_OPERATOR" margin=0.1]
+		f8_p0 [label="Pipeline 0
+(SINK)
+  DATA_STREAM_SINK_OPERATOR (dest_id=5)
+  STREAMING_AGGREGATION_OPERATOR (id=4)
+  HASH_JOIN_OPERATOR (id=3)
+  LOCAL_EXCHANGE_OPERATOR" margin=0.1]
+		{
+			{
+				rank=0
+				f8_p3
+			}
+			{
+				rank=1
+				f8_p1
+			}
+			{
+				rank=2
+				f8_p2
+			}
+			{
+				rank=3
+				f8_p0
+			}
+			f8_p3 -> f8_p1 [dir=none style=invis weight=100]
+			f8_p1 -> f8_p2 [dir=none style=invis weight=100]
+			f8_p2 -> f8_p0 [dir=none style=invis weight=100]
+		}
+	}
+	subgraph level_4 {
+		rank=same
+	}
+	subgraph cluster_9 {
+		color=blue label="Fragment 9" margin=8 pad=0.2 style=rounded
+		f9_p1 [label="Pipeline 1
+  LOCAL_EXCHANGE_SINK_OPERATOR
+  OLAP_SCAN_OPERATOR (id=0)" margin=0.1]
+		f9_p0 [label="Pipeline 0
+(SINK)
+  DATA_STREAM_SINK_OPERATOR (dest_id=1)
+  LOCAL_EXCHANGE_OPERATOR" margin=0.1]
+		{
+			{
+				rank=0
+				f9_p1
+			}
+			{
+				rank=1
+				f9_p0
+			}
+			f9_p1 -> f9_p0 [dir=none style=invis weight=100]
+		}
+	}
+	subgraph level_5 {
+		rank=same
+	}
+	f1_p0 -> f0_p0 [label=sink lhead=cluster_0 ltail=cluster_1]
+	f2_p0 -> f1_p3 [label=sink lhead=cluster_1 ltail=cluster_2]
+	f3_p0 -> f1_p4 [label=sink lhead=cluster_1 ltail=cluster_3]
+	f4_p0 -> f3_p4 [label=sink lhead=cluster_3 ltail=cluster_4]
+	f5_p0 -> f3_p3 [label=sink lhead=cluster_3 ltail=cluster_5]
+	f6_p0 -> f5_p1 [label=sink lhead=cluster_5 ltail=cluster_6]
+	f7_p2 -> f6_p0 [label=sink lhead=cluster_6 ltail=cluster_7]
+	f7_p3 -> f3_p2 [label=sink lhead=cluster_3 ltail=cluster_7]
+	f8_p0 -> f7_p1 [label=sink lhead=cluster_7 ltail=cluster_8]
+	f9_p0 -> f8_p3 [label=sink lhead=cluster_8 ltail=cluster_9]
+}
