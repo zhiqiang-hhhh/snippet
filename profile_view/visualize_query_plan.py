@@ -413,27 +413,28 @@ def build_fragments(key_lines: BiIndexDict) -> Dict[str, Fragment]:
             continue
 
         # Check for operator lines
-        operator_match = re.match(r'\s*(\w+_OPERATOR)\s*(?:\((.*?)\))?:', content)
+        operator_match = re.match(r'\s*(\w+_OPERATOR)(?:\s*\((.*?)\))?\s*\(((?:dest_id|id)=[^)]+)\):', content)
         if operator_match:
             op_name = operator_match.group(1)
-            op_params = operator_match.group(2) or ""
+            extra_info = operator_match.group(2)  # 可能为None
+            params = operator_match.group(3)  # dest_id=xx 或 id=xx
+            
+            # 如果有额外信息，将其添加到operator名称中
+            if extra_info:
+                op_name = f"{op_name} ({extra_info})"
             
             # Parse operator parameters
             op_id = None
             dst_ids = []
             
-            if op_params:
-                # 对于非 sink operator，提取 id
-                if "SINK_OPERATOR" not in op_name:
-                    id_match = re.search(r'id=(\d+)', op_params)
-                    if id_match:
-                        op_id = id_match.group(1)
-                
-                # 提取 dest_id (主要用于 sink operator)
-                if "dest_id=" in op_params:
-                    dest_match = re.search(r'dest_id=([0-9,]+)', op_params)
-                    if dest_match:
-                        dst_ids = dest_match.group(1).split(',')
+            if "dest_id=" in params:
+                dest_match = re.search(r'dest_id=([\d,]+)', params)
+                if dest_match:
+                    dst_ids = dest_match.group(1).split(',')
+            else:
+                id_match = re.search(r'id=(-?\d+)', params)
+                if id_match:
+                    op_id = id_match.group(1)
             
             current_operator = Operator(name=op_name, id=op_id, dst_ids=dst_ids)
             current_pipeline.operators.append(current_operator)
@@ -451,26 +452,68 @@ def build_fragments(key_lines: BiIndexDict) -> Dict[str, Fragment]:
 
     return fragments
 
+def extract_merged_profile(file_path: str) -> str:
+    """从文件中提取 MergedProfile 部分的内容"""
+    merged_profile = []
+    in_merged_profile = False
+
+    try:
+        with open(file_path, 'r') as file:
+            for line in file:
+                if line.strip() == 'MergedProfile':
+                    print("\n>>> Found MergedProfile section <<<")
+                    in_merged_profile = True
+                    continue
+                elif line.strip().startswith('Execution Profile'):
+                    print("\n>>> Found Execution Profile section, extraction completed <<<")
+                    break
+                
+                if in_merged_profile:
+                    merged_profile.append(line)
+
+    except IOError as e:
+        print(f"Error reading file {file_path}: {e}")
+        return ""
+    
+    result = "".join(merged_profile)
+    print("\n=== Extracted MergedProfile Content ===")
+    # print(result)
+    print("======= End of MergedProfile =======\n")
+    
+    return result
+
 def main():
     if len(sys.argv) != 2:
         print("Usage: python visualize_query_plan.py <profile_file>")
         return
 
     profile_path = sys.argv[1]
-    key_lines = parse_profile(profile_path)
     
-    # Build fragments
+    # 首先提取 MergedProfile 部分
+    merged_profile = extract_merged_profile(profile_path)
+    
+    # 使用临时文件处理 MergedProfile
+    import tempfile
+    with tempfile.NamedTemporaryFile(mode='w', delete=False) as temp_file:
+        temp_file.write(merged_profile)
+        temp_path = temp_file.name
+    
+    # 解析 MergedProfile
+    key_lines = parse_profile(temp_path)
+    
+    # 删除临时文件
+    import os
+    os.unlink(temp_path)
+    
+    # 构建和可视化执行计划
     fragments = build_fragments(key_lines)
-    
-    # Build relationships
     build_fragment_relationships(fragments)
     
-    # Create and save visualization
     dot = create_fragment_graph(fragments)
     output_path = profile_path + ".graph"
     dot.render(output_path, view=True, format='pdf')
     
-    # Print text representation
+    # 打印文本表示
     print("\nFragment Structure:")
     print("=" * 50)
     for fragment_id in sorted(fragments.keys(), key=int):
