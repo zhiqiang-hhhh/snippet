@@ -1,0 +1,9 @@
+[submodule "usearch/usearch"]
+	path = usearch/usearch
+	url = git@github.com:unum-cloud/usearch.git
+[submodule "faiss/faiss"]
+	path = faiss/faiss
+	url = git@github.com:facebookresearch/faiss.git
+[submodule "faiss/OpenBLAS"]
+	path = faiss/OpenBLAS
+	url = git@github.com:OpenMathLib/OpenBLAS.git
