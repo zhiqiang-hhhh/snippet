@@ -13,3 +13,6 @@
 [submodule "vector-search/knowhere/faiss"]
 	path = vector-search/knowhere/faiss
 	url = git@github.com:facebookresearch/faiss.git
+[submodule "contrib/faiss"]
+	path = contrib/faiss
+	url = git@github.com:facebookresearch/faiss.git
