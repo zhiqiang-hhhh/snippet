@@ -7,3 +7,9 @@
 [submodule "faiss/OpenBLAS"]
 	path = faiss/OpenBLAS
 	url = git@github.com:OpenMathLib/OpenBLAS.git
+[submodule "vector-search/knowhere/knowhere"]
+	path = vector-search/knowhere/knowhere
+	url = git@github.com:zilliztech/knowhere.git
+[submodule "vector-search/knowhere/faiss"]
+	path = vector-search/knowhere/faiss
+	url = git@github.com:facebookresearch/faiss.git
