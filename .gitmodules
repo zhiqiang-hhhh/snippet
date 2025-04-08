@@ -16,3 +16,9 @@
 [submodule "contrib/faiss"]
 	path = contrib/faiss
 	url = git@github.com:facebookresearch/faiss.git
+[submodule "contrib/DiskANN"]
+	path = contrib/DiskANN
+	url = git@github.com:microsoft/DiskANN.git
+[submodule "contrib/openblas"]
+	path = contrib/openblas
+	url = git@github.com:OpenMathLib/OpenBLAS.git

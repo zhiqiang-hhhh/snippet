@@ -1,5 +1,6 @@
-#include "faiss/IndexFlat.h"
-#include "faiss/IndexHNSW.h"
+#include <faiss/IndexFlat.h>
+#include <faiss/index_io.h>
+#include <faiss/IndexHNSW.h>
 #include <iostream>
 
 int main() {
@@ -30,8 +31,17 @@ int main() {
         std::cout << "HNSW Distance: " << distances[i] << ", Label: " << labels[i] << std::endl;
     }
 
-    delete[] x;
-    delete[] y;
-    delete[] labels;
-    delete[] distances;
+    faiss::write_index(hnsw_index.get(), "/tmp/hnsw.index");
+
+    faiss::IndexHNSWFlat* hnsw_index_read = dynamic_cast<faiss::IndexHNSWFlat*>(faiss::read_index("/tmp/hnsw.index"));
+    if (hnsw_index_read) {
+        std::cout << "Successfully read HNSW index from file." << std::endl;
+    } else {
+        std::cerr << "Failed to read HNSW index from file." << std::endl;
+    }
+
+    hnsw_index_read->search(n, y, 1, distances, labels);  // Changed from n to 1 neighbors
+    for (int i = 0; i < n; i++) {
+        std::cout << "HNSW Read Distance: " << distances[i] << ", Label: " << labels[i] << std::endl;
+    }
 }
