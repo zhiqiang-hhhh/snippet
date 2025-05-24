@@ -22,3 +22,6 @@
 [submodule "contrib/openblas"]
 	path = contrib/openblas
 	url = git@github.com:OpenMathLib/OpenBLAS.git
+[submodule "contrib/hyperscan"]
+	path = contrib/hyperscan
+	url = https://github.com/intel/hyperscan.git
