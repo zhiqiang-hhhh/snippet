@@ -137,7 +137,7 @@ CREATE TABLE `{table_name}` (
   `embedding` array<float>  NOT NULL  COMMENT "",
   INDEX idx_test_ann (`embedding`) USING ANN PROPERTIES(
       "index_type"="hnsw",
-      "metric_type"="l2",
+      "metric_type"="l2_distance",
       "dim"="{dim}"
   )
 ) ENGINE=OLAP
@@ -185,9 +185,8 @@ def main():
         # counts = [1, 5, 10, 50, 100, 500, 1000, 5000, 10000]
         # dims = [1024, 2048, 4096, 8192]
         dims = [1, 4, 8, 16, 32,  1024, 2048]
-        counts = [10, 1000, 2000]
-        # counts = [10]
-        
+        counts = [10, 1000, 2000, 5000, 10000]
+
         logger.info(f"Testing dimensions: {dims}")
         logger.info(f"Testing counts: {counts}")
 
