@@ -11,7 +11,7 @@ import matplotlib.pyplot as plt
 
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
+    format='%(asctime)s - %(levelname)s - %(filename)s:%(lineno)d - %(message)s',
     datefmt='%Y-%m-%d %H:%M:%S'
 )
 logger = logging.getLogger(__name__)
@@ -25,9 +25,10 @@ def read_tsv_data(file_path: str) -> Tuple[np.ndarray, np.ndarray]:
         lines = f.readlines()
         for line in lines:
             parts = line.strip().split("\t")
-            if len(parts) >= 2:
+            if len(parts) >= 3:  # Now expecting id, category, embedding
                 ids.append(int(parts[0]))
-                vector = np.array([float(x) for x in parts[1].strip('[]').split(',')], dtype=np.float32)
+                # Skip category (parts[1]) and use embedding (parts[2])
+                vector = np.array([float(x) for x in parts[2].strip('[]').split(',')], dtype=np.float32)
                 embeddings.append(vector)
     
     return np.array(ids, dtype=np.int64), np.array(embeddings, dtype=np.float32)
@@ -200,59 +201,77 @@ def get_radius(query_vector: np.ndarray, embeddings: np.ndarray, percentile: int
     # Return the specified percentile
     return float(np.percentile(distances, percentile))
 
-# Global dictionary to track comparison results across all tests
-comparison_summary = {
-    "Range Search": {
-        "total_tests": 0,
-        "avg_overlap_pct": 0,
-        "avg_max_diff": 0,
-        "avg_mean_diff": 0,
-        "dimensions_tested": set(),
-        "diff_count": 0  # Track tests with common IDs
-    },
-    "Top-N Search": {
-        "total_tests": 0,
-        "avg_overlap_pct": 0,
-        "avg_max_diff": 0,
-        "avg_mean_diff": 0,
-        "dimensions_tested": set(),
-        "diff_count": 0
-    },
-    "Compound Search": {
-        "total_tests": 0,
-        "avg_overlap_pct": 0,
-        "avg_max_diff": 0,
-        "avg_mean_diff": 0,
-        "dimensions_tested": set(),
-        "diff_count": 0
-    }
-}
-
+# _table_metrics 结构说明:
+# {
+#     table_name: {
+#         test_name: {
+#             "doris_precision": float,   # Doris结果的precision（命中ground truth的比例，0~1）
+#             "doris_recall": float,      # Doris结果的recall（ground truth被命中的比例，0~1）
+#             "overlap": float,           # Doris与FAISS结果ID的重叠比例（交集/FAISS结果数，0~1）
+#         },
+#         ...
+#     },
+#     ...
+# }
 _table_metrics = {}
 
-def compute_overlap(faiss_ids: set, doris_ids: set) -> float:
-    """计算重合率（交集/FAISS结果数）"""
-    if not faiss_ids:
+def compute_overlap(faiss_results: List[Tuple[int, float]], doris_results: List[Tuple], distance_tolerance: float = 1e-3) -> float:
+    """计算重合率（ID和距离都匹配的结果数/FAISS结果数）"""
+    if not faiss_results:
         return 0.0
-    return len(faiss_ids & doris_ids) / len(faiss_ids)
+    
+    # 创建字典便于快速查找 {id: distance}
+    faiss_dict = {result[0]: result[1] for result in faiss_results}
+    doris_dict = {int(result[0]): float(result[1]) for result in doris_results}
+    
+    matched_count = 0
+    for faiss_id, faiss_dist in faiss_dict.items():
+        if faiss_id in doris_dict:
+            doris_dist = doris_dict[faiss_id]
+            # 检查距离是否在容差范围内相等
+            if abs(faiss_dist - doris_dist) <= distance_tolerance:
+                matched_count += 1
+    
+    return matched_count / len(faiss_results)
 
-def compute_precision(doris_ids: set, ground_truth_ids: set) -> float:
-    """计算正确率（Doris命中ground truth的比例）"""
-    if not doris_ids:
+def compute_precision(doris_results: List[Tuple], ground_truth_results: List[Tuple[int, float]], distance_tolerance: float = 1e-3) -> float:
+    """计算正确率（Doris命中ground truth且距离匹配的比例）"""
+    if not doris_results:
         return 0.0
-    return len(doris_ids & ground_truth_ids) / len(doris_ids)
+    
+    # 创建字典便于快速查找 {id: distance}
+    gt_dict = {result[0]: result[1] for result in ground_truth_results}
+    
+    matched_count = 0
+    for doris_result in doris_results:
+        doris_id = int(doris_result[0])
+        doris_dist = float(doris_result[1])
+        
+        if doris_id in gt_dict:
+            gt_dist = gt_dict[doris_id]
+            # 检查距离是否在容差范围内相等
+            if abs(doris_dist - gt_dist) <= distance_tolerance:
+                matched_count += 1
+    
+    return matched_count / len(doris_results)
 
-def compute_recall(doris_ids: set, ground_truth_ids: set) -> float:
-    """计算召回率（ground truth被Doris命中的比例）"""
-    if not ground_truth_ids:
+def compute_recall(doris_results: List[Tuple], ground_truth_results: List[Tuple[int, float]], distance_tolerance: float = 1e-3) -> float:
+    """计算召回率（ground truth被Doris命中且距离匹配的比例）"""
+    if not ground_truth_results:
         return 0.0
-    return len(doris_ids & ground_truth_ids) / len(ground_truth_ids)
-
-def brute_force_topn(query_vector: np.ndarray, embeddings: np.ndarray, ids: np.ndarray, topk: int) -> List[Tuple[int, float]]:
-    """暴力计算topk ground truth"""
-    dists = np.linalg.norm(embeddings - query_vector, axis=1)
-    idxs = np.argsort(dists)[:topk]
-    return [(int(ids[i]), float(dists[i])) for i in idxs]
+    
+    # 创建字典便于快速查找 {id: distance}
+    doris_dict = {int(result[0]): float(result[1]) for result in doris_results}
+    
+    matched_count = 0
+    for gt_id, gt_dist in ground_truth_results:
+        if gt_id in doris_dict:
+            doris_dist = doris_dict[gt_id]
+            # 检查距离是否在容差范围内相等
+            if abs(doris_dist - gt_dist) <= distance_tolerance:
+                matched_count += 1
+    
+    return matched_count / len(ground_truth_results)
 
 def compare_and_log(
     faiss_results: List[Tuple[int, float]],
@@ -260,256 +279,124 @@ def compare_and_log(
     test_name: str,
     dimension: int = 0,
     table_name: str = None,
-    ground_truth: Optional[List[Tuple[int, float]]] = None
+    ground_truth: Optional[List[Tuple[int, float]]] = None,
+    distance_tolerance: float = 1e-3
 ):
-    """对比并输出重合率、正确率、召回率"""
-    faiss_ids = {result[0] for result in faiss_results}
-    doris_ids = {int(result[0]) for result in doris_results}
-    overlap = compute_overlap(faiss_ids, doris_ids)
-    logger.info(f"[{test_name}] Overlap: {overlap*100:.2f}%")
+    """输出精度、召回率、重叠比例（基于ID和距离的匹配）"""
+    # 使用新的比较函数，考虑距离值
+    overlap = compute_overlap(faiss_results, doris_results, distance_tolerance)
 
-    # 统计指标
-    faiss_precision = faiss_recall = doris_precision = doris_recall = None
-
+    doris_precision = doris_recall = faiss_precision = faiss_recall = None
     if ground_truth is not None:
-        gt_ids = {result[0] for result in ground_truth}
-        # Doris 准确率/召回率
-        doris_precision = compute_precision(doris_ids, gt_ids)
-        doris_recall = compute_recall(doris_ids, gt_ids)
-        # Faiss 准确率/召回率
-        faiss_precision = compute_precision(faiss_ids, gt_ids)
-        faiss_recall = compute_recall(faiss_ids, gt_ids)
-    # Range search: 只输出正确率
-    if test_name == "Range Search":
-        if ground_truth is not None:
-            gt_ids = {result[0] for result in ground_truth}
-            precision = compute_precision(doris_ids, gt_ids)
-            logger.info(f"[{test_name}] Precision: {precision*100:.2f}%")
-        else:
-            logger.info(f"[{test_name}] Precision: N/A (no ground truth)")
-        recall = None
+        doris_precision = compute_precision(doris_results, ground_truth, distance_tolerance)
+        doris_recall = compute_recall(doris_results, ground_truth, distance_tolerance)
+        faiss_precision = compute_precision([(r[0], r[1]) for r in faiss_results], ground_truth, distance_tolerance)
+        faiss_recall = compute_recall([(r[0], r[1]) for r in faiss_results], ground_truth, distance_tolerance)
+
+    # 打印 precision/recall/overlap
+    logger.info(f"[{test_name}] Overlap (ID+Distance): {overlap*100:.2f}%")
+    if ground_truth is not None:
+        logger.info(f"[{test_name}] Doris Precision (ID+Distance): {doris_precision*100:.2f}%")
+        logger.info(f"[{test_name}] Doris Recall (ID+Distance): {doris_recall*100:.2f}%")
+        logger.info(f"[{test_name}] Faiss Precision (ID+Distance): {faiss_precision*100:.2f}%")
+        logger.info(f"[{test_name}] Faiss Recall (ID+Distance): {faiss_recall*100:.2f}%")
     else:
-        # topn/compound: 输出正确率和召回率
-        if ground_truth is not None:
-            gt_ids = {result[0] for result in ground_truth}
-            precision = compute_precision(doris_ids, gt_ids)
-            recall = compute_recall(doris_ids, gt_ids)
-            logger.info(f"[{test_name}] Precision: {precision*100:.2f}%")
-            logger.info(f"[{test_name}] Recall: {recall*100:.2f}%")
-        else:
-            logger.info(f"[{test_name}] Precision: N/A (no ground truth)")
-            logger.info(f"[{test_name}] Recall: N/A (no ground truth)")
+        logger.info(f"[{test_name}] Precision: N/A (no ground truth)")
+        logger.info(f"[{test_name}] Recall: N/A (no ground truth)")
 
-    # 兼容原有的表统计
+    # 记录详细指标
     if table_name:
-        if not hasattr(print_comparison_summary, "_table_overlaps"):
-            print_comparison_summary._table_overlaps = {}
-        table_overlaps = print_comparison_summary._table_overlaps
-        if table_name not in table_overlaps:
-            table_overlaps[table_name] = []
-        table_overlaps[table_name].append(overlap*100)
-
-        # 新增：记录详细指标
         if table_name not in _table_metrics:
             _table_metrics[table_name] = {}
         _table_metrics[table_name][test_name] = {
-            "overlap": overlap,
-            "faiss_precision": faiss_precision,
-            "faiss_recall": faiss_recall,
             "doris_precision": doris_precision,
             "doris_recall": doris_recall,
+            "faiss_precision": faiss_precision,
+            "faiss_recall": faiss_recall,
+            "overlap": overlap,
         }
 
-def compare_results(faiss_results: List[Tuple[int, float]], doris_results: List[Tuple], test_name: str, dimension: int = 0, table_name: str = None) -> None:
-    """
-    Compare results from Faiss and Doris searches and log the differences.
-    
-    Args:
-        faiss_results: List of (id, distance) tuples from Faiss
-        doris_results: List of (id, distance) tuples from Doris
-        test_name: Name of the test for logging
-        dimension: Vector dimension for the current test
-    """
-    global comparison_summary
-    
-    # Extract IDs from both results
-    faiss_ids = {result[0] for result in faiss_results}
-    doris_ids = {int(result[0]) for result in doris_results}
-    
-    # Calculate overlap of IDs
-    common_ids = faiss_ids.intersection(doris_ids)
-    only_in_faiss = faiss_ids - doris_ids
-    only_in_doris = doris_ids - faiss_ids
-    
-    # Calculate overlap percentage
-    overlap_pct = (len(common_ids) / max(1, len(faiss_ids))) * 100
-    
-    # Calculate distance differences for common IDs
-    diffs = []
-    faiss_dist_map = {result[0]: result[1] for result in faiss_results}
-    doris_dist_map = {int(result[0]): float(result[1]) for result in doris_results}
-    
-    for id_val in common_ids:
-        diff = abs(faiss_dist_map[id_val] - doris_dist_map[id_val])
-        diffs.append(diff)
-    
-    # Log comparison results
-    logger.info(f"\n--- {test_name} Comparison ---")
-    logger.info(f"Total IDs in Faiss: {len(faiss_ids)}, Total IDs in Doris: {len(doris_ids)}")
-    logger.info(f"Common IDs: {len(common_ids)} ({overlap_pct:.1f}% overlap)")
-    
-    if only_in_faiss:
-        logger.info(f"IDs only in Faiss: {only_in_faiss}")
-    if only_in_doris:
-        logger.info(f"IDs only in Doris: {only_in_doris}")
-    
-    max_diff = 0
-    avg_diff = 0
-    if diffs:
-        max_diff = max(diffs)
-        avg_diff = sum(diffs) / len(diffs)
-        logger.info(f"Max distance difference: {max_diff:.6f}")
-        logger.info(f"Avg distance difference: {avg_diff:.6f}")
-    else:
-        logger.info("No common IDs to compare distances")
-    
-    # Update the global summary
-    if test_name in comparison_summary:
-        comparison_summary[test_name]["total_tests"] += 1
-        comparison_summary[test_name]["avg_overlap_pct"] += overlap_pct
-        comparison_summary[test_name]["dimensions_tested"].add(dimension)
-        if diffs:
-            comparison_summary[test_name]["avg_max_diff"] += max_diff
-            comparison_summary[test_name]["avg_mean_diff"] += avg_diff
-            comparison_summary[test_name]["diff_count"] += 1  # Count tests with common IDs
-
-    # 收集每个表的 overlap
-    if table_name:
-        if not hasattr(print_comparison_summary, "_table_overlaps"):
-            print_comparison_summary._table_overlaps = {}
-        table_overlaps = print_comparison_summary._table_overlaps
-        if table_name not in table_overlaps:
-            table_overlaps[table_name] = []
-        table_overlaps[table_name].append(overlap_pct)
-
 def print_comparison_summary():
-    """Print a summary of all comparison results at the end of the script"""
+    """输出精度-召回率-重叠比例表格和图像，并增加FAISS原生结果表格"""
     logger.info("\n" + "="*80)
-    logger.info("OVERALL TEST RESULTS SUMMARY")
-    logger.info("="*80)
-    
-    # Overall summary
-    all_tests_count = sum(data["total_tests"] for data in comparison_summary.values())
-    all_dimensions = set()
-    for data in comparison_summary.values():
-        all_dimensions.update(data["dimensions_tested"])
-    
-    logger.info(f"Total tests performed: {all_tests_count} across {len(all_dimensions)} dimensions")
-    logger.info(f"Dimensions tested: {sorted(all_dimensions)}")
-    
-    # Per-test type summary
-    for test_name, data in comparison_summary.items():
-        total_tests = data["total_tests"]
-        diff_count = data.get("diff_count", 0)
-        if total_tests > 0:
-            avg_overlap = data["avg_overlap_pct"] / total_tests
-            avg_max_diff = (data["avg_max_diff"] / diff_count) if diff_count > 0 else 0
-            avg_mean_diff = (data["avg_mean_diff"] / diff_count) if diff_count > 0 else 0
-            
-            logger.info(f"\n{test_name} Summary (across {total_tests} tests):")
-            logger.info(f"Average overlap percentage: {avg_overlap:.2f}%")
-            logger.info(f"Average maximum distance difference: {avg_max_diff:.6f}")
-            logger.info(f"Average mean distance difference: {avg_mean_diff:.6f}")
-            logger.info(f"Dimensions tested: {sorted(data['dimensions_tested'])}")
-    
-    logger.info("\nCONCLUSION:")
-    # Add overall conclusion based on results
-    if all_tests_count > 0:
-        avg_all_overlap = sum(
-            data["avg_overlap_pct"] for data in comparison_summary.values()
-        ) / all_tests_count
-        logger.info(f"Overall average overlap: {avg_all_overlap:.2f}%")
-        if avg_all_overlap > 90:
-            logger.info("EXCELLENT MATCH: Doris and Faiss results are highly consistent (>90% overlap)")
-        elif avg_all_overlap > 75:
-            logger.info("GOOD MATCH: Doris and Faiss results are mostly consistent (>75% overlap)")
-        elif avg_all_overlap > 50:
-            logger.info("FAIR MATCH: Doris and Faiss results show moderate consistency (>50% overlap)")
-        else:
-            logger.info("POOR MATCH: Significant differences between Doris and Faiss results (<50% overlap)")
-    else:
-        logger.info("No tests performed.")
-
-    # 打印测试结果较差的表（平均 overlap < 75%）
-    bad_tables = []
-    if hasattr(print_comparison_summary, "_table_overlaps"):
-        table_overlaps = print_comparison_summary._table_overlaps
-        for table, overlaps in table_overlaps.items():
-            if overlaps:
-                avg_overlap = sum(overlaps) / len(overlaps)
-                if avg_overlap < 75:
-                    bad_tables.append((table, avg_overlap))
-    if bad_tables:
-        logger.info("\nTables with poor test results (average overlap < 75%):")
-        for table, avg_overlap in bad_tables:
-            logger.info(f"  {table}: average overlap = {avg_overlap:.2f}%")
-    else:
-        logger.info("\nNo tables with average overlap < 75%.")
-    
+    logger.info("SUMMARY: Doris Precision/Recall/Overlap (ID+Distance Match)")
     logger.info("="*80)
 
-    # 新增：打印详细表格
+    # Doris表格
     if _table_metrics:
         import tabulate
         headers = [
             "Table",
-            "Range Overlap", "Range Faiss P", "Range Faiss R", "Range Doris P", "Range Doris R",
-            "TopN Overlap", "TopN Faiss P", "TopN Faiss R", "TopN Doris P", "TopN Doris R",
-            "Compound Overlap", "Compound Faiss P", "Compound Faiss R", "Compound Doris P", "Compound Doris R"
+            "Range Doris P", "Range Doris R", "Range Overlap",
+            "TopN Doris P", "TopN Doris R", "TopN Overlap",
+            "Compound Doris P", "Compound Doris R", "Compound Overlap"
         ]
         rows = []
         for table in sorted(_table_metrics.keys()):
             row = [table]
             # Range Search
             m = _table_metrics[table].get("Range Search", {})
-            row.append(f"{(m.get('overlap', 0)*100):.2f}" if m.get('overlap') is not None else "")
-            row.append(f"{(m.get('faiss_precision', 0)*100):.2f}" if m.get('faiss_precision') is not None else "")
-            row.append(f"{(m.get('faiss_recall', 0)*100):.2f}" if m.get('faiss_recall') is not None else "")
             row.append(f"{(m.get('doris_precision', 0)*100):.2f}" if m.get('doris_precision') is not None else "")
             row.append(f"{(m.get('doris_recall', 0)*100):.2f}" if m.get('doris_recall') is not None else "")
+            row.append(f"{(m.get('overlap', 0)*100):.2f}" if m.get('overlap') is not None else "")
             # Top-N Search
             m = _table_metrics[table].get("Top-N Search", {})
-            row.append(f"{(m.get('overlap', 0)*100):.2f}" if m.get('overlap') is not None else "")
-            row.append(f"{(m.get('faiss_precision', 0)*100):.2f}" if m.get('faiss_precision') is not None else "")
-            row.append(f"{(m.get('faiss_recall', 0)*100):.2f}" if m.get('faiss_recall') is not None else "")
             row.append(f"{(m.get('doris_precision', 0)*100):.2f}" if m.get('doris_precision') is not None else "")
             row.append(f"{(m.get('doris_recall', 0)*100):.2f}" if m.get('doris_recall') is not None else "")
+            row.append(f"{(m.get('overlap', 0)*100):.2f}" if m.get('overlap') is not None else "")
             # Compound Search
             m = _table_metrics[table].get("Compound Search", {})
-            row.append(f"{(m.get('overlap', 0)*100):.2f}" if m.get('overlap') is not None else "")
-            row.append(f"{(m.get('faiss_precision', 0)*100):.2f}" if m.get('faiss_precision') is not None else "")
-            row.append(f"{(m.get('faiss_recall', 0)*100):.2f}" if m.get('faiss_recall') is not None else "")
             row.append(f"{(m.get('doris_precision', 0)*100):.2f}" if m.get('doris_precision') is not None else "")
             row.append(f"{(m.get('doris_recall', 0)*100):.2f}" if m.get('doris_recall') is not None else "")
+            row.append(f"{(m.get('overlap', 0)*100):.2f}" if m.get('overlap') is not None else "")
             rows.append(row)
         try:
             table_str = tabulate.tabulate(rows, headers, tablefmt="github")
         except Exception:
-            # fallback: simple print
             table_str = "\n".join(
                 ["\t".join(headers)] +
                 ["\t".join(row) for row in rows]
             )
-        logger.info("\nDETAILED TABLE METRICS:\n" + table_str)
+        logger.info("\nDORIS PRECISION/RECALL/OVERLAP TABLE:\n" + table_str)
 
-    # ===== 新增：绘制精度-召回率图像 =====
+    # ===== 新增：打印FAISS原生结果表格 =====
+    # 只打印faiss的precision/recall（与ground truth的对比），不打印overlap
+    faiss_headers = [
+        "Table",
+        "Range Faiss P", "Range Faiss R",
+        "TopN Faiss P", "TopN Faiss R",
+        "Compound Faiss P", "Compound Faiss R"
+    ]
+    faiss_rows = []
+    for table in sorted(_table_metrics.keys()):
+        row = [table]
+        # Range Search
+        m = _table_metrics[table].get("Range Search", {})
+        row.append(f"{(m.get('faiss_precision', 0)*100):.2f}" if m.get('faiss_precision') is not None else "")
+        row.append(f"{(m.get('faiss_recall', 0)*100):.2f}" if m.get('faiss_recall') is not None else "")
+        # Top-N Search
+        m = _table_metrics[table].get("Top-N Search", {})
+        row.append(f"{(m.get('faiss_precision', 0)*100):.2f}" if m.get('faiss_precision') is not None else "")
+        row.append(f"{(m.get('faiss_recall', 0)*100):.2f}" if m.get('faiss_recall') is not None else "")
+        # Compound Search
+        m = _table_metrics[table].get("Compound Search", {})
+        row.append(f"{(m.get('faiss_precision', 0)*100):.2f}" if m.get('faiss_precision') is not None else "")
+        row.append(f"{(m.get('faiss_recall', 0)*100):.2f}" if m.get('faiss_recall') is not None else "")
+        faiss_rows.append(row)
+    try:
+        faiss_table_str = tabulate.tabulate(faiss_rows, faiss_headers, tablefmt="github")
+    except Exception:
+        faiss_table_str = "\n".join(
+            ["\t".join(faiss_headers)] +
+            ["\t".join(row) for row in faiss_rows]
+        )
+    logger.info("\nFAISS PRECISION/RECALL TABLE:\n" + faiss_table_str)
+
     # 只画 Top-N Search 的精度和召回率
     table_points = []
     for table, metrics in _table_metrics.items():
         m = metrics.get("Top-N Search", {})
-        # 只画有数据的
         if m.get("doris_precision") is not None and m.get("doris_recall") is not None:
-            # 取doris的精度和召回率
             table_points.append({
                 "table": table,
                 "precision": m["doris_precision"],
@@ -517,13 +404,11 @@ def print_comparison_summary():
             })
 
     if table_points:
-        # 解析维度和行数
         for p in table_points:
             parts = p["table"].split("_")
             p["dim"] = int(parts[1])
             p["num"] = int(parts[3])
 
-        # 第一张图：同一维度连线
         plt.figure(figsize=(10, 7))
         dims = sorted(set(p["dim"] for p in table_points))
         colors = plt.cm.get_cmap('tab20', len(dims))
@@ -541,7 +426,7 @@ def print_comparison_summary():
                 plt.text(g["recall"], g["precision"], g["table"], fontsize=7)
         plt.xlabel("Recall")
         plt.ylabel("Precision")
-        plt.title("Precision-Recall by Dimension (Top-N Search)")
+        plt.title("Doris Precision-Recall by Dimension (Top-N Search, ID+Distance Match)")
         plt.legend()
         plt.grid(True)
         img_path1 = "summary_precision_recall_by_dim.png"
@@ -549,7 +434,6 @@ def print_comparison_summary():
         logger.info(f"Saved precision-recall plot by dimension to {img_path1}")
         plt.close()
 
-        # 第二张图：同一行数连线
         plt.figure(figsize=(10, 7))
         nums = sorted(set(p["num"] for p in table_points))
         colors = plt.cm.get_cmap('tab20', len(nums))
@@ -567,50 +451,61 @@ def print_comparison_summary():
                 plt.text(g["recall"], g["precision"], g["table"], fontsize=7)
         plt.xlabel("Recall")
         plt.ylabel("Precision")
-        plt.title("Precision-Recall by Row Count (Top-N Search)")
+        plt.title("Doris Precision-Recall by Row Count (Top-N Search, ID+Distance Match)")
         plt.legend()
         plt.grid(True)
         img_path2 = "summary_precision_recall_by_num.png"
         plt.savefig(img_path2)
         logger.info(f"Saved precision-recall plot by row count to {img_path2}")
         plt.close()
+def brute_force_topn(query_vector: np.ndarray, embeddings: np.ndarray, ids: np.ndarray, topk: int) -> List[Tuple[int, float]]:
+    """暴力计算topk ground truth"""
+    dists = np.linalg.norm(embeddings - query_vector, axis=1)
+    idxs = np.argsort(dists)[:topk]
+    return [(int(ids[i]), float(dists[i])) for i in idxs]
+
 def main() -> None:
+    # ===== 新增：模式选择 =====
+    do_range_search = True
+    do_topn_search = True
+    do_compound_search = True
+
     tables = [
         "dim_1_num_10",
         "dim_1_num_1000",
         "dim_1_num_2000",
         "dim_1_num_5000",
         "dim_1_num_10000",
-        # "dim_4_num_10",
-        # "dim_4_num_1000",
-        # "dim_4_num_2000",
-        # "dim_4_num_5000",
-        # "dim_4_num_10000",
-        # "dim_8_num_10",
-        # "dim_8_num_1000",
-        # "dim_8_num_2000",
-        # "dim_8_num_5000",
-        # "dim_8_num_10000",
-        # "dim_16_num_10",
-        # "dim_16_num_1000",
-        # "dim_16_num_2000",
-        # "dim_16_num_5000",
-        # "dim_16_num_10000",
-        # "dim_32_num_10",
-        # "dim_32_num_1000",
-        # "dim_32_num_2000",
-        # "dim_32_num_5000",
-        # "dim_32_num_10000",
-        # "dim_1024_num_10",
-        # "dim_1024_num_1000",
-        # "dim_1024_num_2000",
-        # "dim_1024_num_5000",
-        # "dim_1024_num_10000",
-        # "dim_2048_num_10",
-        # "dim_2048_num_1000",
-        # "dim_2048_num_2000",
-        # "dim_2048_num_5000",
-        # "dim_2048_num_10000",
+        "dim_4_num_10",
+        "dim_4_num_1000",
+        "dim_4_num_2000",
+        "dim_4_num_5000",
+        "dim_4_num_10000",
+        "dim_8_num_10",
+        "dim_8_num_1000",
+        "dim_8_num_2000",
+        "dim_8_num_5000",
+        "dim_8_num_10000",
+        "dim_16_num_10",
+        "dim_16_num_1000",
+        "dim_16_num_2000",
+        "dim_16_num_5000",
+        "dim_16_num_10000",
+        "dim_32_num_10",
+        "dim_32_num_1000",
+        "dim_32_num_2000",
+        "dim_32_num_5000",
+        "dim_32_num_10000",
+        "dim_1024_num_10",
+        "dim_1024_num_1000",
+        "dim_1024_num_2000",
+        "dim_1024_num_5000",
+        "dim_1024_num_10000",
+        "dim_2048_num_10",
+        "dim_2048_num_1000",
+        "dim_2048_num_2000",
+        "dim_2048_num_5000",
+        "dim_2048_num_10000",
     ]
     
     script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -644,100 +539,105 @@ def main() -> None:
         query_vector_str = str(query_vector.tolist()).replace(' ', '')
         
         # Use Doris
+        # cursor.execute(f"USE vector_test_1_bucket;")
         cursor.execute(f"USE vector_test;")
 
         # 1. Range search with percentile-based radius
-        percentile_less = random.randint(30, 70)  # Random percentile between 30-70
-        radius_less = get_radius(query_vector, embeddings, percentile_less)
-        logger.info(f"--- Range Search (distance < {radius_less:.2f}, {percentile_less}th percentile) ---")
-        
-        # Faiss range search
-        faiss_range_results = faiss_range_search(index, query_vector, radius_less)
-        brute_force_index = build_faiss_index("flat","l2", embeddings, ids, dimension)
-        ground_truth = faiss_range_search(brute_force_index, query_vector, radius_less)
-        # Doris range search
-        range_search_sql = f"""
-            SELECT * FROM (SELECT id, l2_distance(embedding, {query_vector_str}) as distance FROM {table} WHERE l2_distance(embedding, {query_vector_str}) < {radius_less}) as SUB ORDER BY distance;"""
-        if dimension <= 8:
-            logger.info(f"SQL: {range_search_sql}")
-        cursor.execute(range_search_sql)
-        doris_range_results = cursor.fetchall()
+        if do_range_search:
+            percentile_less = random.randint(30, 70)  # Random percentile between 30-70
+            radius_less = get_radius(query_vector, embeddings, percentile_less)
+            logger.info(f"--- Range Search (distance < {radius_less:.2f}, {percentile_less}th percentile) ---")
+            
+            # Faiss range search
+            faiss_range_results = faiss_range_search(index, query_vector, radius_less)
+            brute_force_index = build_faiss_index("flat", "l2", embeddings, ids, dimension)
+            ground_truth = faiss_range_search(brute_force_index, query_vector, radius_less)
+            # Doris range search
+            range_search_sql = f"""
+                SELECT * FROM (SELECT id, l2_distance_approximate(embedding, {query_vector_str}) as distance, category FROM {table} WHERE l2_distance_approximate(embedding, {query_vector_str}) < {radius_less}) as SUB ORDER BY distance;"""
+            if dimension <= 8:
+                logger.info(f"SQL: {range_search_sql}")
+            cursor.execute(range_search_sql)
+            doris_range_results = cursor.fetchall()
 
-        # 比较结果
-        compare_and_log(
-            faiss_range_results,
-            doris_range_results,
-            "Range Search",
-            dimension,
-            table_name=table,
-            ground_truth=ground_truth
-        )
+            # 比较结果
+            compare_and_log(
+                faiss_range_results,
+                doris_range_results,
+                "Range Search",
+                dimension,
+                table_name=table,
+                ground_truth=ground_truth
+            )
 
         # 3. Top-N search
-        logger.info("--- Top-N Search ---")
-        
-        # 随机生成topK
-        topk = random.randint(3, 100)
-        logger.info(f"Top-N search with K={topk}")
+        if do_topn_search:
+            logger.info("--- Top-N Search ---")
+            
+            # 随机生成topK
+            topk = random.randint(3, 100)
+            logger.info(f"Top-N search with K={topk}")
 
-        # Faiss top-N search
-        faiss_topn_results = faiss_topn_search(index, query_vector, limit=topk)
-        # logger.info(f"Faiss top-N search results: {faiss_topn_results}")
-        
-        # Doris top-N search
-        topn_search_sql = f"""SELECT id, l2_distance(embedding, {query_vector_str}) FROM {table} ORDER BY l2_distance(embedding, {query_vector_str}) limit {topk};"""
-        if dimension <= 8:
-            logger.info(f"SQL: {topn_search_sql}")
-        cursor.execute(topn_search_sql)
-        doris_topn_results = cursor.fetchall()
-        # logger.info(f"Doris top-N search results: {doris_topn_results}")
-        
-        # 计算topn ground truth（暴力法）
-        gt_topn = brute_force_topn(query_vector, embeddings, ids, topk)
-        compare_and_log(
-            faiss_topn_results,
-            doris_topn_results,
-            "Top-N Search",
-            dimension,
-            table_name=table,
-            ground_truth=gt_topn
-        )
+            # Faiss top-N search
+            faiss_topn_results = faiss_topn_search(index, query_vector, limit=topk)
+            # logger.info(f"Faiss top-N search results: {faiss_topn_results}")
+            
+            # Doris top-N search
+            topn_search_sql = f"""SELECT id, l2_distance_approximate(embedding, {query_vector_str}), category FROM {table} ORDER BY l2_distance_approximate(embedding, {query_vector_str}) limit {topk};"""
+            if dimension <= 8:
+                logger.info(f"SQL: {topn_search_sql}")
+            cursor.execute(topn_search_sql)
+            doris_topn_results = cursor.fetchall()
+
+            # 计算topn ground truth（暴力法）
+            gt_topn = brute_force_topn(query_vector, embeddings, ids, topk)
+
+            compare_and_log(
+                faiss_topn_results,
+                doris_topn_results,
+                "Top-N Search",
+                dimension,
+                table_name=table,
+                ground_truth=gt_topn
+            )
 
         # 4. Compound search with percentile-based radius
-        percentile_compound = random.randint(10, 40)  # Random percentile between 10-40
-        radius_compound = get_radius(query_vector, embeddings, percentile_compound)
-        # 随机生成compound search的topK
-        compound_topk = random.randint(3, 10)
-        logger.info(f"--- Compound Search (distance < {radius_compound:.2f}, {percentile_compound}th percentile, and sorted, K={compound_topk}) ---")
-        
-        # Faiss implementation of compound search
-        faiss_compound_results = faiss_compound_search(index, query_vector, radius_compound, compound_topk)
-        faiss_compound_results.sort(key=lambda x: x[1])  # Sort by distance
-        # logger.info(f"Faiss compound search results: {faiss_compound_results}")
-        
-        # Doris compound search
-        compound_search_sql = f"""SELECT id, l2_distance(embedding, {query_vector_str}) as distance FROM {table} WHERE l2_distance(embedding, {query_vector_str}) < {radius_compound} ORDER BY distance limit {compound_topk};"""
-        if dimension <= 8:
-            logger.info(f"SQL: {compound_search_sql}")
-        cursor.execute(compound_search_sql)
-        doris_compound_results = cursor.fetchall()
-        
-        # 计算compound ground truth（暴力法+距离过滤+排序+topk）
-        dists = np.linalg.norm(embeddings - query_vector, axis=1)
-        mask = dists < radius_compound
-        filtered_ids = ids[mask]
-        filtered_dists = dists[mask]
-        idxs = np.argsort(filtered_dists)[:compound_topk]
-        gt_compound = [(int(filtered_ids[i]), float(filtered_dists[i])) for i in idxs]
+        if do_compound_search:
+            percentile_compound = random.randint(10, 40)  # Random percentile between 10-40
+            radius_compound = get_radius(query_vector, embeddings, percentile_compound)
+            # 随机生成compound search的topK
+            compound_topk = random.randint(3, 10)
+            logger.info(f"--- Compound Search (distance < {radius_compound:.2f}, {percentile_compound}th percentile, and sorted, K={compound_topk}) ---")
+            
+            # Faiss implementation of compound search
+            faiss_compound_results = faiss_compound_search(index, query_vector, radius_compound, compound_topk)
+            faiss_compound_results.sort(key=lambda x: x[1])  # Sort by distance
+            logger.info(f"Faiss compound search results: {faiss_compound_results}")
+            
+            # Doris compound search
+            compound_search_sql = f"""SELECT id, l2_distance_approximate(embedding, {query_vector_str}) as distance, category FROM {table} WHERE l2_distance_approximate(embedding, {query_vector_str}) < {radius_compound} ORDER BY distance limit {compound_topk};"""
+            if dimension <= 8:
+                logger.info(f"SQL: {compound_search_sql}")
+            cursor.execute(compound_search_sql)
+            doris_compound_results = cursor.fetchall()
+            logger.info(f"Doris compound search results: {doris_compound_results}")
 
-        compare_and_log(
-            faiss_compound_results,
-            doris_compound_results,
-            "Compound Search",
-            dimension,
-            table_name=table,
-            ground_truth=gt_compound
-        )
+            # 计算compound ground truth（暴力法+距离过滤+排序+topk）
+            dists = np.linalg.norm(embeddings - query_vector, axis=1)
+            mask = dists < radius_compound
+            filtered_ids = ids[mask]
+            filtered_dists = dists[mask]
+            idxs = np.argsort(filtered_dists)[:compound_topk]
+            gt_compound = [(int(filtered_ids[i]), float(filtered_dists[i])) for i in idxs]
+            logger.info(f"Ground truth for compound search: {gt_compound}")
+            compare_and_log(
+                faiss_compound_results,
+                doris_compound_results,
+                "Compound Search",
+                dimension,
+                table_name=table,
+                ground_truth=gt_compound
+            )
 
         logger.info(f"Completed comparison for table {table}\n" + "-"*50)
     

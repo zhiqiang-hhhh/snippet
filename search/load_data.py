@@ -3,9 +3,11 @@ import mysql.connector
 import pandas as pd
 import logging
 import time
+import sys
 import os
 import requests
 from requests.auth import HTTPBasicAuth
+from faiss.contrib.datasets import DatasetSIFT1M
 import json
 
 # Configure logging
@@ -57,7 +59,7 @@ def stream_load_to_doris(table_name, tsv_path, host="127.0.0.1", port=5937, db="
         'label': f"load_{table_name}_{int(time.time())}",
         'format': 'csv',  # Changed back to csv format which works with TSV when specifying column_separator
         # 'column_separator': '\t',
-        'columns': 'id,embedding',
+        'columns': 'id,category,embedding',
     }
     
     with open(tsv_path, 'rb') as f:
@@ -100,33 +102,18 @@ def stream_load_to_doris(table_name, tsv_path, host="127.0.0.1", port=5937, db="
 
 def generate_dataset(dim, num, low=1, high=100):
     """
-    生成包含 ID 的向量表：DataFrame，列为 id 和 embedding（嵌套 list）
+    生成包含 ID 的向量表：DataFrame，列为 id, category 和 embedding（嵌套 list）
     """
     logger.info(f"Generating dataset with dim={dim}, num={num}")
     start_time = time.time()
     embeddings = np.random.uniform(low, high, size=(num, dim))
     df = pd.DataFrame({
         "id": np.arange(num),
+        "category": np.random.randint(1, 10, size=num),  # 随机生成1-9的分类ID
         "embedding": embeddings.tolist()
     })
     logger.info(f"Dataset generated in {time.time() - start_time:.2f} seconds")
     return df
-
-
-def compute_median_l2_distance(query_vector, dataset):
-    """
-    dataset: DataFrame，embedding 列是 List[float]
-    """
-    logger.info(f"Computing median L2 distance for {len(dataset)} vectors")
-    start_time = time.time()
-    X = np.array(dataset["embedding"].tolist())
-    diff = X - query_vector
-    distances = np.sum(diff ** 2, axis=1)
-    # Remove adding l2_distance to the dataset
-    median = np.median(distances)
-    logger.info(f"Median L2 distance computed: {median:.6f} in {time.time() - start_time:.2f} seconds")
-    return median, dataset
-
 
 def generate_create_table_sql(dim, num):
     logger.info(f"Generating SQL for table with dim={dim}, num={num}")
@@ -134,15 +121,16 @@ def generate_create_table_sql(dim, num):
     return f"""
 CREATE TABLE `{table_name}` (
   `id` int NOT NULL COMMENT "",
+  `category` int NOT NULL COMMENT "分类ID",
   `embedding` array<float>  NOT NULL  COMMENT "",
-  INDEX idx_test_ann (`embedding`) USING ANN PROPERTIES(
+  INDEX idx_test_ann (`embedding`) USING ANN PROPERTIES (
       "index_type"="hnsw",
       "metric_type"="l2_distance",
       "dim"="{dim}"
   )
 ) ENGINE=OLAP
 DUPLICATE KEY(`id`) COMMENT "OLAP"
-DISTRIBUTED BY HASH(`id`) BUCKETS 1
+DISTRIBUTED BY HASH(`id`) BUCKETS 10
 PROPERTIES (
   "replication_num" = "1"
 );
@@ -163,29 +151,80 @@ def get_conn():
         logger.error(f"Database connection failed: {err}")
         raise
 
+
+def load_sift():
+    """Load SIFT-1M dataset to Doris"""
+    logger.info("Loading SIFT 1M dataset")
+    
+    # 1. Load SIFT-1M dataset from data directory.
+    # User should link the pre-downloaded SIFT-1M dataset to the data directory.
+    # http://corpus-texmex.irisa.fr/
+    dataSet = DatasetSIFT1M()
+    query = dataSet.get_queries()
+    database = dataSet.get_database()
+    groundtruth = dataSet.get_groundtruth()
+    # 2. Do transformation. We need a tsv file, so that we can use Doris stream load.
+
+    data_dir = create_data_directory()
+    num = database.shape[0]
+    dim = database.shape[1]
+    df = pd.DataFrame({
+        "id": np.arange(num),
+        "embedding": database.tolist()
+    })
+    table_name = f"sift1m_dim_{dim}_num_{num}"
+    tsv_path = save_dataset_to_tsv(df, table_name, data_dir)
+    logger.info(f"SIFT-1M dataset saved to {tsv_path}")
+
+    # 3. Load data into Doris using Stream Load.
+    try:
+        conn = get_conn()
+        cursor = conn.cursor()
+        cursor.execute("DROP DATABASE IF EXISTS sift_1m;")
+        cursor.execute("CREATE DATABASE sift_1m;")
+        cursor.execute("USE sift_1m;")
+        
+        
+    except mysql.connector.Error as err:
+        logger.error(f"Error loading SIFT small dataset: {err}")
+    finally:
+        cursor.close()
+        conn.close()
+
 def main():
-    logger.info("Starting main process")
+    # bench_datasets = 'sift_small sift gist sift_large'.split()
+    # ds_name = str(sys.argv[1])
+    # logger.info("Starting load data.")
+    
+    # if ds_name  == 'sift':
+    #     load_sift()
+    #     return
+    # else:
+    #     logger.error(f"Dataset {ds_name} is not supported. Supported datasets: {bench_datasets}")
+    #     return
     try:
         # Create data directory
         data_dir = create_data_directory()
         
         conn = get_conn()
         cursor = conn.cursor()
-        
+        db = "vector_test"
         logger.info("Dropping database if exists")
-        cursor.execute("DROP DATABASE IF EXISTS vector_test")
+        cursor.execute(f"DROP DATABASE IF EXISTS {db}")
         
-        logger.info("Creating database vector_test")
-        cursor.execute("CREATE DATABASE vector_test")
+        logger.info(f"Creating database {db}")
+        cursor.execute(f"CREATE DATABASE {db}")
         
-        logger.info("Switching to vector_test database")
-        cursor.execute("USE vector_test")
+        logger.info(f"Switching to {db} database")
+        cursor.execute(f"USE {db}")
 
         # dims = [1, 4, 8, 16, 32, 64, 128, 256, 512, 1024]
         # counts = [1, 5, 10, 50, 100, 500, 1000, 5000, 10000]
         # dims = [1024, 2048, 4096, 8192]
         dims = [1, 4, 8, 16, 32,  1024, 2048]
+        # dims = [1]
         counts = [10, 1000, 2000, 5000, 10000]
+        # counts = [10]
 
         logger.info(f"Testing dimensions: {dims}")
         logger.info(f"Testing counts: {counts}")
@@ -196,10 +235,6 @@ def main():
                 
                 # Generate dataset
                 dataset = generate_dataset(dim, count)
-                
-                # Compute median distance
-                median, dataset = compute_median_l2_distance(dataset.iloc[0]["embedding"], dataset)
-                print(f"Median L2 distance: {median}")
 
                 # Create table
                 table_name = f"dim_{dim}_num_{count}"
@@ -212,7 +247,7 @@ def main():
                 
                 # Load data using stream load with the TSV file
                 logger.info(f"Loading {count} rows into table {table_name} using stream load")
-                stream_load_to_doris(table_name, tsv_path)
+                stream_load_to_doris(table_name, tsv_path, db=db)
                 
                 logger.info(f"Completed processing for dim={dim}, count={count}")
                 
