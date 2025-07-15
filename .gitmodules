@@ -1,21 +1,4 @@
-[submodule "usearch/usearch"]
-	path = usearch/usearch
-	url = git@github.com:unum-cloud/usearch.git
-[submodule "faiss/faiss"]
-	path = faiss/faiss
-	url = git@github.com:facebookresearch/faiss.git
-[submodule "faiss/OpenBLAS"]
-	path = faiss/OpenBLAS
-	url = git@github.com:OpenMathLib/OpenBLAS.git
-[submodule "vector-search/knowhere/knowhere"]
-	path = vector-search/knowhere/knowhere
-	url = git@github.com:zilliztech/knowhere.git
-[submodule "contrib/DiskANN"]
-	path = contrib/DiskANN
-	url = git@github.com:microsoft/DiskANN.git
-[submodule "contrib/openblas"]
-	path = contrib/openblas
-	url = git@github.com:OpenMathLib/OpenBLAS.git
+
 [submodule "contrib/hyperscan"]
 	path = contrib/hyperscan
 	url = https://github.com/intel/hyperscan.git
