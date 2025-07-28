@@ -4,8 +4,8 @@
     "Providers": [
         {
             "name": "custom-api",
-            "api_base_url": "https://175c9c8f.r23.cpolar.top/v1/chat/completions",
-            "api_key": "sk-cpGklKN1fWiac6FjJIDkLKepxPv6Cwk1Yaf83rGRqlq67fZl",
+            "api_base_url": "custom-provider",
+            "api_key": "custom-api-key",
             "models": [
                 "Qwen/Qwen3-Coder-480B-A35B-Instruct"
             ],

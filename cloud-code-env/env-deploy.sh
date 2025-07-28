@@ -62,15 +62,76 @@ echo -e "${BLUE}========================================${NC}\n"
 display_current_env
 echo
 
-# Check if API key is provided as argument
-if [ $# -eq 0 ]; then
-    print_error "请提供API密钥作为参数"
-    echo "使用方法: $0 <your-api-key>"
+# Function to validate provider URL format
+validate_provider_url() {
+    local url="$1"
+    
+    # Check if URL is empty
+    if [ -z "$url" ]; then
+        print_error "Provider URL 不能为空"
+        return 1
+    fi
+    
+    # Check if URL starts with http:// or https://
+    if [[ ! "$url" =~ ^https?:// ]]; then
+        print_error "Provider URL 必须以 http:// 或 https:// 开头"
+        print_error "当前URL: $url"
+        return 1
+    fi
+    
+    # Remove trailing slashes for consistency
+    url="${url%/}"
+    
+    # Check if URL ends with /v1/chat/completions (and remove it if present)
+    if [[ "$url" =~ /v1/chat/completions$ ]]; then
+        print_warning "检测到URL已包含 /v1/chat/completions 后缀"
+        url="${url%/v1/chat/completions}"
+        print_info "将使用基础URL: $url"
+        print_info "最终URL将为: $url/v1/chat/completions"
+    fi
+    
+    # Basic URL format validation (check for valid domain pattern)
+    if [[ ! "$url" =~ ^https?://[a-zA-Z0-9.-]+([0-9]+)?(/.*)?$ ]]; then
+        print_error "Provider URL 格式不正确"
+        print_error "当前URL: $url"
+        print_error "正确格式示例: https://api.example.com 或 http://localhost:8000"
+        return 1
+    fi
+    
+    # Set the cleaned URL back to the global variable
+    PROVIDER_URL="$url"
+    print_success "Provider URL 格式验证通过: $PROVIDER_URL"
+    return 0
+}
+
+# Check if both API key and provider URL are provided as arguments
+if [ $# -lt 2 ]; then
+    print_error "请提供API密钥和提供商URL作为参数"
+    echo "使用方法: $0 <your-api-key> <provider-url>"
+    echo "  your-api-key: 必需的API密钥"
+    echo "  provider-url: 必需的提供商URL（将自动添加 /v1/chat/completions 后缀）"
     exit 1
 fi
 
 ANTHROPIC_API_KEY="$1"
+PROVIDER_URL="$2"  # 第二个参数为必需的 provider URL
 ANTHROPIC_BASE_URL="http://127.0.0.1:3456"
+
+# Validate provider URL format
+if ! validate_provider_url "$PROVIDER_URL"; then
+    print_error "Provider URL 验证失败，请检查URL格式"
+    echo ""
+    echo "正确的使用示例："
+    echo "  $0 sk-ant-1234567890 https://api.example.com"
+    echo "  $0 sk-ant-1234567890 http://localhost:8000"
+    echo "  $0 sk-ant-1234567890 https://339fe73e.r11.vip.cpolar.cn"
+    echo ""
+    echo "注意："
+    echo "  - URL必须以 http:// 或 https:// 开头"
+    echo "  - 不需要手动添加 /v1/chat/completions 后缀，脚本会自动添加"
+    echo "  - 如果URL已包含该后缀，脚本会自动检测并处理"
+    exit 1
+fi
 
 # Detect OS and shell
 detect_os_and_shell() {
@@ -352,17 +413,27 @@ configure_claude_code_router() {
         return 1
     fi
     
-    # Validate that API key was provided
+    # Validate that API key and provider URL were provided
     if [ -z "$ANTHROPIC_API_KEY" ]; then
         print_error "未提供 API key，无法配置 Claude Code Router"
         print_error "请在运行脚本时提供 API key 作为参数"
         return 1
     fi
     
-    # Create a temporary config file with the API key replaced
+    if [ -z "$PROVIDER_URL" ]; then
+        print_error "未提供 Provider URL，无法配置 Claude Code Router"
+        print_error "请在运行脚本时提供 Provider URL 作为第二个参数"
+        return 1
+    fi
+    
+    # Create a temporary config file with the API key and provider URL replaced
     local temp_config="$source_config.tmp"
-    if jq --arg api_key "$ANTHROPIC_API_KEY" '.Providers[0].api_key = $api_key' "$source_config" > "$temp_config"; then
-        print_success "已将 API key 插入到配置中"
+    # Update both api_key and api_base_url with the provider URL
+    if jq --arg api_key "$ANTHROPIC_API_KEY" --arg provider_url "$PROVIDER_URL/v1/chat/completions" \
+       '.Providers[0].api_key = $api_key | .Providers[0].api_base_url = $provider_url' \
+       "$source_config" > "$temp_config"; then
+        print_success "已将 API key 和 Provider URL 插入到配置中"
+        print_info "Provider URL 设置为: $PROVIDER_URL/v1/chat/completions"
     else
         print_error "配置文件 JSON 格式错误或无法处理"
         rm -f "$temp_config"
@@ -385,7 +456,9 @@ configure_claude_code_router() {
         # Display the config content (mask the API key for security)
         print_info "当前 CCR 配置内容:"
         echo -e "${BLUE}----------------------------------------${NC}"
-        if jq --arg masked_key "****${ANTHROPIC_API_KEY: -4}" '.Providers[0].api_key = $masked_key' "$target_config" 2>/dev/null; then
+        # Show masked API key and provider URL
+        if jq --arg masked_key "****${ANTHROPIC_API_KEY: -4}" --arg provider_url "$PROVIDER_URL/v1/chat/completions" \
+           '.Providers[0].api_key = $masked_key | .Providers[0].api_base_url = $provider_url' "$target_config" 2>/dev/null; then
             true
         else
             echo "无法读取配置文件"
@@ -559,7 +632,7 @@ start_ccr_service() {
     
     # Try to start ccr
     print_info "尝试启动 Claude Code Router..."
-    if $ccr_cmd start 2>/dev/null; then
+    if $ccr_cmd restart 2>/dev/null; then
         print_success "Claude Code Router 启动成功"
         
         # Wait a moment and check if it's running
