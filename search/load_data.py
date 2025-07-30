@@ -221,10 +221,10 @@ def main():
         # dims = [1, 4, 8, 16, 32, 64, 128, 256, 512, 1024]
         # counts = [1, 5, 10, 50, 100, 500, 1000, 5000, 10000]
         # dims = [1024, 2048, 4096, 8192]
-        dims = [1, 4, 8, 16, 32,  1024]
-        # dims = [1]
-        counts = [10, 1000, 2000, 5000, 10000]
-        # counts = [10]
+        # dims = [1, 4, 8, 16, 32,  716]
+        dims = [716]
+        # counts = [10, 1000, 2000, 5000, 10000]
+        counts = [10000000]
 
         logger.info(f"Testing dimensions: {dims}")
         logger.info(f"Testing counts: {counts}")
