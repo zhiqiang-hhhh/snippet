@@ -6,6 +6,7 @@ import time
 import sys
 import os
 import requests
+import argparse
 from requests.auth import HTTPBasicAuth
 from faiss.contrib.datasets import DatasetSIFT1M
 import json
@@ -191,6 +192,18 @@ def load_sift():
         cursor.close()
         conn.close()
 
+def check_database_exists(cursor, db_name):
+    """Check if database exists"""
+    cursor.execute("SHOW DATABASES;")
+    databases = [row[0] for row in cursor.fetchall()]
+    return db_name in databases
+
+def check_table_exists(cursor, table_name):
+    """Check if table exists"""
+    cursor.execute("SHOW TABLES;")
+    tables = [row[0] for row in cursor.fetchall()]
+    return table_name in tables
+
 def main():
     # bench_datasets = 'sift_small sift gist sift_large'.split()
     # ds_name = str(sys.argv[1])
@@ -202,6 +215,14 @@ def main():
     # else:
     #     logger.error(f"Dataset {ds_name} is not supported. Supported datasets: {bench_datasets}")
     #     return
+    
+    # Add mode parameter
+    import argparse
+    parser = argparse.ArgumentParser(description='Load data to Doris')
+    parser.add_argument('--mode', choices=['force', 'skip'], default='skip', 
+                        help='force: drop and recreate database/table; skip: skip if exists (default)')
+    args = parser.parse_args()
+    
     try:
         # Create data directory
         data_dir = create_data_directory()
@@ -209,22 +230,35 @@ def main():
         conn = get_conn()
         cursor = conn.cursor()
         db = "vector_test"
-        logger.info("Dropping database if exists")
-        cursor.execute(f"DROP DATABASE IF EXISTS {db}")
         
-        logger.info(f"Creating database {db}")
-        cursor.execute(f"CREATE DATABASE {db}")
-        
-        logger.info(f"Switching to {db} database")
-        cursor.execute(f"USE {db}")
+        if args.mode == 'force':
+            logger.info("Dropping database if exists")
+            cursor.execute(f"DROP DATABASE IF EXISTS {db}")
+            
+            logger.info(f"Creating database {db}")
+            cursor.execute(f"CREATE DATABASE {db}")
+            
+            logger.info(f"Switching to {db} database")
+            cursor.execute(f"USE {db}")
+        else:
+            # Check if database exists, create if not
+            if not check_database_exists(cursor, db):
+                logger.info(f"Creating database {db}")
+                cursor.execute(f"CREATE DATABASE {db}")
+            else:
+                logger.info(f"Database {db} already exists, using existing database")
+            
+            logger.info(f"Switching to {db} database")
+            cursor.execute(f"USE {db}")
 
         # dims = [1, 4, 8, 16, 32, 64, 128, 256, 512, 1024]
+        dims = [512, 716, 1024]
         # counts = [1, 5, 10, 50, 100, 500, 1000, 5000, 10000]
         # dims = [1024, 2048, 4096, 8192]
         # dims = [1, 4, 8, 16, 32,  716]
-        dims = [716]
-        # counts = [10, 1000, 2000, 5000, 10000]
-        counts = [10000000]
+        # dims = [716]
+        counts = [10, 1000, 2000, 5000]
+        # counts = [10000000]
 
         logger.info(f"Testing dimensions: {dims}")
         logger.info(f"Testing counts: {counts}")
@@ -238,16 +272,27 @@ def main():
 
                 # Create table
                 table_name = f"dim_{dim}_num_{count}"
-                logger.info(f"Creating table {table_name}")
-                create_table_sql = generate_create_table_sql(dim, count)
-                cursor.execute(create_table_sql)
                 
-                # Save dataset to TSV instead of CSV
-                tsv_path = save_dataset_to_tsv(dataset, table_name, data_dir)
+                # Check if table exists in skip mode
+                table_exists = check_table_exists(cursor, table_name)
                 
-                # Load data using stream load with the TSV file
-                logger.info(f"Loading {count} rows into table {table_name} using stream load")
-                stream_load_to_doris(table_name, tsv_path, db=db)
+                if args.mode == 'force' or not table_exists:
+                    if table_exists:
+                        logger.info(f"Dropping table {table_name}")
+                        cursor.execute(f"DROP TABLE IF EXISTS {table_name}")
+                    
+                    logger.info(f"Creating table {table_name}")
+                    create_table_sql = generate_create_table_sql(dim, count)
+                    cursor.execute(create_table_sql)
+                    
+                    # Save dataset to TSV instead of CSV
+                    tsv_path = save_dataset_to_tsv(dataset, table_name, data_dir)
+                    
+                    # Load data using stream load with the TSV file
+                    logger.info(f"Loading {count} rows into table {table_name} using stream load")
+                    stream_load_to_doris(table_name, tsv_path, db=db)
+                else:
+                    logger.info(f"Table {table_name} already exists, skipping data import")
                 
                 logger.info(f"Completed processing for dim={dim}, count={count}")
                 
