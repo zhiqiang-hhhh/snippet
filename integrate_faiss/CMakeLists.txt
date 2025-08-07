@@ -25,3 +25,6 @@ add_subdirectory(${PROJECT_SOURCE_DIR}/../contrib/faiss ${PROJECT_BINARY_DIR}/fa
 
 add_executable(integrate_faiss main.cpp)
 target_link_libraries(integrate_faiss PRIVATE faiss)
+
+add_executable(test_hnswpq test_hnswpq.cpp)
+target_link_libraries(test_hnswpq PRIVATE faiss)
