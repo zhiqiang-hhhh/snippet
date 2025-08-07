@@ -219,7 +219,7 @@ def main():
     # Add mode parameter
     import argparse
     parser = argparse.ArgumentParser(description='Load data to Doris')
-    parser.add_argument('--mode', choices=['force', 'skip'], default='skip', 
+    parser.add_argument('--mode', choices=['force', 'skip'], default='force', 
                         help='force: drop and recreate database/table; skip: skip if exists (default)')
     args = parser.parse_args()
     
@@ -252,10 +252,10 @@ def main():
             cursor.execute(f"USE {db}")
 
         # dims = [1, 4, 8, 16, 32, 64, 128, 256, 512, 1024]
-        dims = [512, 716, 1024]
+        # dims = [512, 716, 1024]
         # counts = [1, 5, 10, 50, 100, 500, 1000, 5000, 10000]
         # dims = [1024, 2048, 4096, 8192]
-        # dims = [1, 4, 8, 16, 32,  716]
+        dims = [1, 4, 8, 16, 32,  716]
         # dims = [716]
         counts = [10, 1000, 2000, 5000]
         # counts = [10000000]
