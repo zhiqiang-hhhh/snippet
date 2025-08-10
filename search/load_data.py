@@ -19,6 +19,9 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# 每个段的行数
+CHUNK_SIZE = 500000  # 50万行
+
 def create_data_directory():
     """Create a data directory to store CSV files if it doesn't exist"""
     script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -27,6 +30,26 @@ def create_data_directory():
         os.makedirs(data_dir)
         logger.info(f"Created data directory at {data_dir}")
     return data_dir
+
+def save_dataset_chunk_to_tsv(dataset_chunk, table_name, chunk_idx, data_dir):
+    """Save a chunk of the dataset to a TSV file without headers"""
+    tsv_path = os.path.join(data_dir, f"{table_name}_chunk_{chunk_idx}.tsv")
+    
+    # Check if the TSV file already exists
+    if os.path.exists(tsv_path):
+        logger.info(f"TSV chunk file already exists at {tsv_path}, skipping creation")
+        return tsv_path
+    
+    logger.info(f"Saving dataset chunk {chunk_idx} to {tsv_path}")
+    
+    # Convert embedding lists to strings for TSV storage but keep the square brackets
+    dataset_copy = dataset_chunk.copy()
+    dataset_copy['embedding'] = dataset_copy['embedding'].apply(lambda x: str(x))
+    
+    # Write to TSV without headers
+    dataset_copy.to_csv(tsv_path, index=False, sep='\t', header=False)
+    logger.info(f"Dataset chunk {chunk_idx} saved to {tsv_path} without headers")
+    return tsv_path
 
 def save_dataset_to_tsv(dataset, table_name, data_dir):
     """Save the dataset to a TSV file without headers"""
@@ -50,16 +73,20 @@ def save_dataset_to_tsv(dataset, table_name, data_dir):
 
 def stream_load_to_doris(table_name, tsv_path, host="127.0.0.1", port=5937, db="vector_test"):
     """Load data from TSV file to Doris using Stream Load"""
-    logger.info(f"Loading data to table {table_name} using Stream Load")
+    logger.info(f"Loading data to table {table_name} using Stream Load from {tsv_path}")
     start_time = time.time()
+    
+    # Clean file basename to create valid label (remove extension and replace dots with underscores)
+    file_basename = os.path.basename(tsv_path)
+    clean_basename = os.path.splitext(file_basename)[0].replace('.', '_')
     
     url = f"http://{host}:{port}/api/{db}/{table_name}/_stream_load"
     headers = {
         'Expect': '100-continue',
         'Content-Type': 'text/plain; charset=UTF-8',
-        'label': f"load_{table_name}_{int(time.time())}",
-        'format': 'csv',  # Changed back to csv format which works with TSV when specifying column_separator
-        # 'column_separator': '\t',
+        'label': f"load_{table_name}_{int(time.time())}_{clean_basename}",
+        'format': 'csv',  # Using csv format with tab separator for TSV files
+        'column_separator': '\\t',  # Use escaped tab character for HTTP header
         'columns': 'id,category,embedding',
     }
     
@@ -98,8 +125,29 @@ def stream_load_to_doris(table_name, tsv_path, host="127.0.0.1", port=5937, db="
         except json.JSONDecodeError:
             logger.warning("Could not parse response as JSON")
 
+        elapsed_time = time.time() - start_time
+        logger.info(f"Stream load completed in {elapsed_time:.2f} seconds")
+
     except Exception as e:
         logger.error(f"Error during stream load: {e}", exc_info=True)
+
+def generate_dataset_chunk(dim, start_id, chunk_size, low=1, high=100):
+    """
+    生成数据段，返回 DataFrame
+    """
+    logger.info(f"Generating dataset chunk: start_id={start_id}, chunk_size={chunk_size}, dim={dim}")
+    start_time = time.time()
+    
+    embeddings = np.random.uniform(low, high, size=(chunk_size, dim))
+    df = pd.DataFrame({
+        "id": np.arange(start_id, start_id + chunk_size),
+        "category": np.random.randint(1, 10, size=chunk_size),  # 随机生成1-9的分类ID
+        "embedding": embeddings.tolist()
+    })
+    
+    elapsed_time = time.time() - start_time
+    logger.info(f"Dataset chunk generated in {elapsed_time:.2f} seconds")
+    return df
 
 def generate_dataset(dim, num, low=1, high=100):
     """
@@ -116,6 +164,107 @@ def generate_dataset(dim, num, low=1, high=100):
     logger.info(f"Dataset generated in {time.time() - start_time:.2f} seconds")
     return df
 
+def check_chunk_exists_in_db(table_name, chunk_idx, chunk_size, db="vector_test", host="127.0.0.1", port=6937):
+    """Check if chunk data already exists in database by checking row count"""
+    try:
+        conn = mysql.connector.connect(
+            user="root",
+            password="",
+            host=host,
+            port=port,
+            database=db
+        )
+        cursor = conn.cursor()
+        
+        start_id = chunk_idx * chunk_size
+        end_id = start_id + chunk_size - 1
+        
+        # Check if data in this chunk range exists
+        query = f"SELECT COUNT(*) FROM {table_name} WHERE id >= {start_id} AND id <= {end_id}"
+        cursor.execute(query)
+        result = cursor.fetchone()
+        
+        cursor.close()
+        conn.close()
+        
+        # If we have the expected number of rows, chunk exists
+        expected_rows = chunk_size
+        actual_rows = result[0] if result else 0
+        
+        logger.info(f"Chunk {chunk_idx}: expected {expected_rows} rows, found {actual_rows} rows in DB")
+        return actual_rows == expected_rows
+        
+    except mysql.connector.Error as err:
+        logger.warning(f"Could not check chunk {chunk_idx} in database: {err}")
+        return False
+
+def process_large_dataset_in_chunks(dim, total_count, table_name, data_dir, db="vector_test"):
+    """
+    分段处理大数据集，每50万行为一个段，支持断点续传
+    """
+    logger.info(f"Processing large dataset in chunks: dim={dim}, total_count={total_count}")
+    
+    # 计算需要的段数
+    num_chunks = (total_count + CHUNK_SIZE - 1) // CHUNK_SIZE
+    logger.info(f"Will process {num_chunks} chunks of max {CHUNK_SIZE} rows each")
+    
+    total_start_time = time.time()
+    processed_chunks = 0
+    skipped_chunks = 0
+    
+    for chunk_idx in range(num_chunks):
+        chunk_start_time = time.time()
+        start_id = chunk_idx * CHUNK_SIZE
+        current_chunk_size = min(CHUNK_SIZE, total_count - start_id)
+        
+        logger.info(f"=== Processing chunk {chunk_idx + 1}/{num_chunks} ===")
+        logger.info(f"Chunk range: {start_id} to {start_id + current_chunk_size - 1} (size: {current_chunk_size})")
+        
+        # 检查TSV文件是否存在
+        tsv_path = os.path.join(data_dir, f"{table_name}_chunk_{chunk_idx}.tsv")
+        tsv_exists = os.path.exists(tsv_path)
+        
+        # 检查数据库中是否已有该chunk的数据
+        db_has_chunk = check_chunk_exists_in_db(table_name, chunk_idx, current_chunk_size, db)
+        
+        if tsv_exists and db_has_chunk:
+            logger.info(f"Chunk {chunk_idx} already exists in both file and database, skipping")
+            skipped_chunks += 1
+            chunk_elapsed = time.time() - chunk_start_time
+            logger.info(f"Chunk {chunk_idx + 1} skipped in {chunk_elapsed:.2f} seconds")
+        else:
+            # 如果TSV不存在，需要生成数据并保存
+            if not tsv_exists:
+                logger.info(f"TSV file not found, generating chunk {chunk_idx} data")
+                dataset_chunk = generate_dataset_chunk(dim, start_id, current_chunk_size)
+                tsv_path = save_dataset_chunk_to_tsv(dataset_chunk, table_name, chunk_idx, data_dir)
+                # 清理内存
+                del dataset_chunk
+            else:
+                logger.info(f"TSV file exists at {tsv_path}, using existing file")
+            
+            # 如果数据库中没有数据，需要加载
+            if not db_has_chunk:
+                logger.info(f"Database doesn't have chunk {chunk_idx} data, loading from TSV")
+                stream_load_to_doris(table_name, tsv_path, db=db)
+            else:
+                logger.info(f"Database already has chunk {chunk_idx} data, skipping load")
+            
+            processed_chunks += 1
+            chunk_elapsed = time.time() - chunk_start_time
+            logger.info(f"Chunk {chunk_idx + 1} processed in {chunk_elapsed:.2f} seconds")
+        
+        # 进度报告
+        completed_rows = (chunk_idx + 1) * CHUNK_SIZE if chunk_idx < num_chunks - 1 else total_count
+        progress = (completed_rows / total_count) * 100
+        logger.info(f"Progress: {completed_rows}/{total_count} rows ({progress:.1f}%)")
+    
+    total_elapsed = time.time() - total_start_time
+    logger.info(f"All chunks completed in {total_elapsed:.2f} seconds")
+    logger.info(f"Processed chunks: {processed_chunks}, Skipped chunks: {skipped_chunks}")
+    if processed_chunks > 0:
+        logger.info(f"Average time per processed chunk: {total_elapsed / processed_chunks:.2f} seconds")
+
 def generate_create_table_sql(dim, num):
     logger.info(f"Generating SQL for table with dim={dim}, num={num}")
     table_name = f"dim_{dim}_num_{num}"
@@ -131,7 +280,7 @@ CREATE TABLE `{table_name}` (
   )
 ) ENGINE=OLAP
 DUPLICATE KEY(`id`) COMMENT "OLAP"
-DISTRIBUTED BY HASH(`id`) BUCKETS 10
+DISTRIBUTED BY HASH(`id`) BUCKETS 1
 PROPERTIES (
   "replication_num" = "1"
 );
@@ -219,7 +368,7 @@ def main():
     # Add mode parameter
     import argparse
     parser = argparse.ArgumentParser(description='Load data to Doris')
-    parser.add_argument('--mode', choices=['force', 'skip'], default='skip', 
+    parser.add_argument('--mode', choices=['force', 'skip'], default='force', 
                         help='force: drop and recreate database/table; skip: skip if exists (default)')
     args = parser.parse_args()
     
@@ -252,24 +401,22 @@ def main():
             cursor.execute(f"USE {db}")
 
         # dims = [1, 4, 8, 16, 32, 64, 128, 256, 512, 1024]
-        dims = [512, 716, 1024]
+        # dims = [512, 716, 1024]
         # counts = [1, 5, 10, 50, 100, 500, 1000, 5000, 10000]
         # dims = [1024, 2048, 4096, 8192]
-        # dims = [1, 4, 8, 16, 32,  716]
+        dims = [716]
         # dims = [716]
-        counts = [10, 1000, 2000, 5000]
+        counts = [10000000]
         # counts = [10000000]
 
         logger.info(f"Testing dimensions: {dims}")
         logger.info(f"Testing counts: {counts}")
+        logger.info(f"Chunk size: {CHUNK_SIZE} rows per chunk")
 
         for dim in dims:
             for count in counts:
                 logger.info(f"=== Processing dim={dim}, count={count} ===")
                 
-                # Generate dataset
-                dataset = generate_dataset(dim, count)
-
                 # Create table
                 table_name = f"dim_{dim}_num_{count}"
                 
@@ -285,12 +432,21 @@ def main():
                     create_table_sql = generate_create_table_sql(dim, count)
                     cursor.execute(create_table_sql)
                     
-                    # Save dataset to TSV instead of CSV
-                    tsv_path = save_dataset_to_tsv(dataset, table_name, data_dir)
-                    
-                    # Load data using stream load with the TSV file
-                    logger.info(f"Loading {count} rows into table {table_name} using stream load")
-                    stream_load_to_doris(table_name, tsv_path, db=db)
+                    # 判断是否需要分段处理
+                    if count > CHUNK_SIZE:
+                        logger.info(f"Large dataset detected ({count} rows > {CHUNK_SIZE}), processing in chunks")
+                        process_large_dataset_in_chunks(dim, count, table_name, data_dir, db)
+                    else:
+                        logger.info(f"Small dataset ({count} rows <= {CHUNK_SIZE}), processing normally")
+                        # Generate dataset
+                        dataset = generate_dataset(dim, count)
+                        
+                        # Save dataset to TSV instead of CSV
+                        tsv_path = save_dataset_to_tsv(dataset, table_name, data_dir)
+                        
+                        # Load data using stream load with the TSV file
+                        logger.info(f"Loading {count} rows into table {table_name} using stream load")
+                        stream_load_to_doris(table_name, tsv_path, db=db)
                 else:
                     logger.info(f"Table {table_name} already exists, skipping data import")
                 

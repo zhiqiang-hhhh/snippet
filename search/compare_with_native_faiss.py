@@ -470,43 +470,7 @@ def main() -> None:
     do_topn_search = True
     do_compound_search = True
 
-    tables = [
-        "dim_1_num_10",
-        "dim_1_num_1000",
-        "dim_1_num_2000",
-        "dim_1_num_5000",
-        "dim_1_num_10000",
-        "dim_4_num_10",
-        "dim_4_num_1000",
-        "dim_4_num_2000",
-        "dim_4_num_5000",
-        "dim_4_num_10000",
-        "dim_8_num_10",
-        "dim_8_num_1000",
-        "dim_8_num_2000",
-        "dim_8_num_5000",
-        "dim_8_num_10000",
-        "dim_16_num_10",
-        "dim_16_num_1000",
-        "dim_16_num_2000",
-        "dim_16_num_5000",
-        "dim_16_num_10000",
-        "dim_32_num_10",
-        "dim_32_num_1000",
-        "dim_32_num_2000",
-        "dim_32_num_5000",
-        "dim_32_num_10000",
-        "dim_1024_num_10",
-        "dim_1024_num_1000",
-        "dim_1024_num_2000",
-        "dim_1024_num_5000",
-        "dim_1024_num_10000",
-        # "dim_2048_num_10",
-        # "dim_2048_num_1000", 
-        # "dim_2048_num_2000",
-        # "dim_2048_num_5000",
-        # "dim_2048_num_10000",
-    ]
+    # 移除硬编码的表列表，改为动态获取
     
     script_dir = os.path.dirname(os.path.abspath(__file__))
     data_dir = os.path.join(script_dir, 'data')
@@ -515,14 +479,56 @@ def main() -> None:
     conn = get_conn()
     cursor = conn.cursor()
     
+    # 动态获取数据库中的表
+    try:
+        cursor.execute(f"USE vector_test;")
+        cursor.execute("SHOW TABLES;")
+        all_tables = cursor.fetchall()
+        
+        # 提取表名并过滤出符合命名规范的表（dim_X_num_Y格式）
+        tables = []
+        for table_row in all_tables:
+            table_name = table_row[0]  # 表名在第一列
+            # 检查表名是否符合 dim_X_num_Y 的格式
+            if table_name.startswith('dim_') and '_num_' in table_name:
+                try:
+                    parts = table_name.split('_')
+                    if len(parts) == 4 and parts[0] == 'dim' and parts[2] == 'num':
+                        # 验证维度和数量是否为数字
+                        int(parts[1])  # dimension
+                        int(parts[3])  # number
+                        tables.append(table_name)
+                except (ValueError, IndexError):
+                    # 如果解析失败，跳过这个表
+                    continue
+        
+        tables.sort()  # 排序以保持一致的处理顺序
+        logger.info(f"Found {len(tables)} tables to test: {tables}")
+        
+        if not tables:
+            logger.error("No tables found with the expected naming pattern (dim_X_num_Y)")
+            return
+            
+    except Exception as e:
+        logger.error(f"Failed to get table list: {e}")
+        return
+    
     for table in tables:
         logger.info(f"Processing table: {table}")
         
         # Extract dimension from table name
-        dimension = int(table.split("_")[1])
+        try:
+            dimension = int(table.split("_")[1])
+        except (ValueError, IndexError):
+            logger.error(f"Could not extract dimension from table name: {table}")
+            continue
         
         # Read data from TSV
         tsv_path = os.path.join(data_dir, f"{table}.tsv")
+        if not os.path.exists(tsv_path):
+            logger.warning(f"TSV file not found: {tsv_path}, skipping table {table}")
+            continue
+            
         ids, embeddings = read_tsv_data(tsv_path)
         
         if len(embeddings) == 0:
