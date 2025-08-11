@@ -282,7 +282,8 @@ CREATE TABLE `{table_name}` (
 DUPLICATE KEY(`id`) COMMENT "OLAP"
 DISTRIBUTED BY HASH(`id`) BUCKETS 1
 PROPERTIES (
-  "replication_num" = "1"
+  "replication_num" = "1",
+  "disable_auto_compaction" = "true"
 );
 """
 
@@ -404,9 +405,9 @@ def main():
         # dims = [512, 716, 1024]
         # counts = [1, 5, 10, 50, 100, 500, 1000, 5000, 10000]
         # dims = [1024, 2048, 4096, 8192]
-        dims = [716]
+        dims = [1]
         # dims = [716]
-        counts = [10000000]
+        counts = [10]
         # counts = [10000000]
 
         logger.info(f"Testing dimensions: {dims}")

@@ -17,21 +17,128 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 def read_tsv_data(file_path: str) -> Tuple[np.ndarray, np.ndarray]:
-    """Read data from TSV file and return IDs and embeddings"""
+    """Read data from a TSV file and return IDs and embeddings.
+
+    If file_path is a directory, randomly pick one .tsv chunk inside and load only that chunk.
+    """
     ids = []
     embeddings = []
-    
-    with open(file_path, "r") as f:
-        lines = f.readlines()
-        for line in lines:
+
+    # Determine which TSV to read
+    if os.path.isdir(file_path):
+        candidates = [os.path.join(file_path, f) for f in os.listdir(file_path) if f.endswith('.tsv')]
+        if not candidates:
+            raise FileNotFoundError(f"No .tsv files found in directory: {file_path}")
+        chosen = random.choice(candidates)
+        logger.info(f"Randomly selected chunk: {os.path.basename(chosen)} from {file_path}")
+        tsv_to_read = chosen
+    elif os.path.isfile(file_path):
+        tsv_to_read = file_path
+    else:
+        raise ValueError(f"Invalid file_path: {file_path}")
+
+    # Read the selected TSV file
+    with open(tsv_to_read, "r") as f:
+        for line in f:
             parts = line.strip().split("\t")
-            if len(parts) >= 3:  # Now expecting id, category, embedding
+            if len(parts) >= 3:
                 ids.append(int(parts[0]))
-                # Skip category (parts[1]) and use embedding (parts[2])
                 vector = np.array([float(x) for x in parts[2].strip('[]').split(',')], dtype=np.float32)
                 embeddings.append(vector)
-    
+
     return np.array(ids, dtype=np.int64), np.array(embeddings, dtype=np.float32)
+
+def get_table_tsv_files(data_dir: str, table: str) -> List[str]:
+    """Return a list of TSV files for the given table.
+    Prefer a single {table}.tsv if it exists; otherwise collect all {table}_chunk_*.tsv files.
+    """
+    single = os.path.join(data_dir, f"{table}.tsv")
+    if os.path.exists(single):
+        return [single]
+    # collect chunk files and sort by chunk index if present
+    candidates = [
+        os.path.join(data_dir, f)
+        for f in os.listdir(data_dir)
+        if f.startswith(f"{table}_chunk_") and f.endswith(".tsv")
+    ]
+    def _chunk_key(p: str) -> int:
+        name = os.path.basename(p)
+        try:
+            return int(name.split("_chunk_")[-1].split(".")[0])
+        except Exception:
+            return 1<<30
+    return sorted(candidates, key=_chunk_key)
+
+def build_faiss_index_from_tsv_files(
+    files: List[str],
+    index_type: str,
+    metric_type: str,
+    dimension: int,
+    batch_size: int = 50000,
+    sample_size: int = 200000,
+) -> Tuple[faiss.IndexIDMap, np.ndarray, np.ndarray]:
+    """Build a FAISS index by streaming through TSV files without loading everything into memory.
+
+    Returns: (index, sample_ids, sample_embeddings) where sample_* are a small subset used for radius estimation.
+    """
+    # create base index
+    if metric_type.lower() in ["l2", "l2 distance"]:
+        metric = faiss.METRIC_L2
+    elif metric_type.lower() in ["ip", "inner product"]:
+        metric = faiss.METRIC_INNER_PRODUCT
+    else:
+        raise ValueError(f"Unsupported metric_type: {metric_type}")
+
+    if index_type.lower() == "flat":
+        base_index = faiss.IndexFlat(dimension, metric)
+    elif index_type.lower() == "hnsw":
+        base_index = faiss.IndexHNSWFlat(dimension, 32, metric)
+    else:
+        raise ValueError(f"Unsupported index_type: {index_type}")
+
+    index = faiss.IndexIDMap(base_index)
+
+    ids_batch: List[int] = []
+    vecs_batch: List[List[float]] = []
+    sample_ids: List[int] = []
+    sample_vecs: List[List[float]] = []
+
+    for fp in files:
+        logger.info(f"Indexing file: {os.path.basename(fp)}")
+        with open(fp, "r") as f:
+            for line in f:
+                parts = line.rstrip("\n").split("\t")
+                if len(parts) < 3:
+                    continue
+                try:
+                    vid = int(parts[0])
+                    vec = [float(x) for x in parts[2].strip('[]').split(',')]
+                except Exception:
+                    continue
+                ids_batch.append(vid)
+                vecs_batch.append(vec)
+
+                # simple head sampling up to sample_size
+                if len(sample_ids) < sample_size:
+                    sample_ids.append(vid)
+                    sample_vecs.append(vec)
+
+                if len(ids_batch) >= batch_size:
+                    index.add_with_ids(np.asarray(vecs_batch, dtype=np.float32), np.asarray(ids_batch, dtype=np.int64))
+                    ids_batch.clear()
+                    vecs_batch.clear()
+
+        # flush remaining per file as well (optional, handled after loop too)
+        if ids_batch:
+            index.add_with_ids(np.asarray(vecs_batch, dtype=np.float32), np.asarray(ids_batch, dtype=np.int64))
+            ids_batch.clear()
+            vecs_batch.clear()
+
+    # finalize sample arrays
+    sample_ids_arr = np.asarray(sample_ids, dtype=np.int64)
+    sample_vecs_arr = np.asarray(sample_vecs, dtype=np.float32)
+    logger.info(f"Finished building index. Total sample size: {len(sample_ids_arr)}")
+    return index, sample_ids_arr, sample_vecs_arr
 
 def build_faiss_index(index_type: str, metric_type: str, embeddings: np.ndarray, ids: np.ndarray, dimension: int) -> faiss.IndexIDMap:
     """
@@ -459,10 +566,61 @@ def print_comparison_summary():
         logger.info(f"Saved precision-recall plot by row count to {img_path2}")
         plt.close()
 def brute_force_topn(query_vector: np.ndarray, embeddings: np.ndarray, ids: np.ndarray, topk: int) -> List[Tuple[int, float]]:
-    """暴力计算topk ground truth"""
+    """暴力计算topk ground truth（数组版，保留以兼容旧用法）"""
     dists = np.linalg.norm(embeddings - query_vector, axis=1)
     idxs = np.argsort(dists)[:topk]
     return [(int(ids[i]), float(dists[i])) for i in idxs]
+
+def brute_force_topn_streaming(query_vector: np.ndarray, files: List[str], topk: int) -> List[Tuple[int, float]]:
+    """在不加载全量内存的情况下，流式计算全表的topk ground truth。"""
+    import heapq
+    # max-heap by negative distance to keep smallest topk
+    heap: List[Tuple[float, int]] = []  # (-dist, id)
+    q = query_vector.astype(np.float32)
+    for fp in files:
+        with open(fp, "r") as f:
+            for line in f:
+                parts = line.rstrip("\n").split("\t")
+                if len(parts) < 3:
+                    continue
+                try:
+                    vid = int(parts[0])
+                    vec = np.fromstring(parts[2].strip('[]'), sep=",", dtype=np.float32)
+                except Exception:
+                    continue
+                # compute l2
+                dist = float(np.linalg.norm(vec - q))
+                if len(heap) < topk:
+                    heapq.heappush(heap, (-dist, vid))
+                else:
+                    if -heap[0][0] > dist:
+                        heapq.heapreplace(heap, (-dist, vid))
+    # extract and sort by distance asc
+    results = [(vid, -negd) for (negd, vid) in heap]
+    results.sort(key=lambda x: x[1])
+    return results
+
+def brute_force_range_streaming(query_vector: np.ndarray, files: List[str], radius: float) -> List[Tuple[int, float]]:
+    """流式计算全表在指定半径内的所有点，返回按距离升序列表。"""
+    q = query_vector.astype(np.float32)
+    res: List[Tuple[int, float]] = []
+    r = float(radius)
+    for fp in files:
+        with open(fp, "r") as f:
+            for line in f:
+                parts = line.rstrip("\n").split("\t")
+                if len(parts) < 3:
+                    continue
+                try:
+                    vid = int(parts[0])
+                    vec = np.fromstring(parts[2].strip('[]'), sep=",", dtype=np.float32)
+                except Exception:
+                    continue
+                dist = float(np.linalg.norm(vec - q))
+                if dist < r:
+                    res.append((vid, dist))
+    res.sort(key=lambda x: x[1])
+    return res
 
 def main() -> None:
     # ===== 新增：模式选择 =====
@@ -523,25 +681,22 @@ def main() -> None:
             logger.error(f"Could not extract dimension from table name: {table}")
             continue
         
-        # Read data from TSV
-        tsv_path = os.path.join(data_dir, f"{table}.tsv")
-        if not os.path.exists(tsv_path):
-            logger.warning(f"TSV file not found: {tsv_path}, skipping table {table}")
+        # Build FAISS index over the entire table using streaming from TSV files
+        files = get_table_tsv_files(data_dir, table)
+        if not files:
+            logger.warning(f"No TSV files found for table {table} in {data_dir}")
             continue
-            
-        ids, embeddings = read_tsv_data(tsv_path)
-        
-        if len(embeddings) == 0:
-            logger.error(f"No data found in {tsv_path}")
-            continue
-            
-        # Build Faiss index with explicit IDs
-        index = build_faiss_index("hnsw", "l2", embeddings, ids, dimension)
-        logger.info(f"Built Faiss index with {len(embeddings)} vectors of dimension {dimension}")
+        index, sample_ids, sample_embeddings = build_faiss_index_from_tsv_files(
+            files, index_type="hnsw", metric_type="l2", dimension=dimension
+        )
+        logger.info(f"Built Faiss index over entire table {table}. ntotal={index.ntotal}")
         
         # Select a random vector for querying
-        random_idx = random.randint(0, len(embeddings) - 1)
-        query_vector = embeddings[random_idx]
+        if len(sample_embeddings) == 0:
+            logger.error("No sample embeddings available for query selection")
+            continue
+        random_idx = random.randint(0, len(sample_embeddings) - 1)
+        query_vector = sample_embeddings[random_idx]
         query_vector_str = str(query_vector.tolist()).replace(' ', '')
         
         # Use Doris
@@ -551,13 +706,13 @@ def main() -> None:
         # 1. Range search with percentile-based radius
         if do_range_search:
             percentile_less = random.randint(30, 70)  # Random percentile between 30-70
-            radius_less = get_radius(query_vector, embeddings, percentile_less)
+            radius_less = get_radius(query_vector, sample_embeddings, percentile_less)
             logger.info(f"--- Range Search (distance < {radius_less:.2f}, {percentile_less}th percentile) ---")
             
             # Faiss range search
             faiss_range_results = faiss_range_search(index, query_vector, radius_less)
-            brute_force_index = build_faiss_index("flat", "l2", embeddings, ids, dimension)
-            ground_truth = faiss_range_search(brute_force_index, query_vector, radius_less)
+            # streaming ground truth across whole table
+            ground_truth = brute_force_range_streaming(query_vector, files, radius_less)
             # Doris range search
             range_search_sql = f"""
                 SELECT * FROM (SELECT id, l2_distance_approximate(embedding, {query_vector_str}) as distance, category FROM {table} WHERE l2_distance_approximate(embedding, {query_vector_str}) < {radius_less}) as SUB ORDER BY distance;"""
@@ -596,7 +751,7 @@ def main() -> None:
             doris_topn_results = cursor.fetchall()
 
             # 计算topn ground truth（暴力法）
-            gt_topn = brute_force_topn(query_vector, embeddings, ids, topk)
+            gt_topn = brute_force_topn_streaming(query_vector, files, topk)
 
             compare_and_log(
                 faiss_topn_results,
@@ -610,7 +765,7 @@ def main() -> None:
         # 4. Compound search with percentile-based radius
         if do_compound_search:
             percentile_compound = random.randint(10, 40)  # Random percentile between 10-40
-            radius_compound = get_radius(query_vector, embeddings, percentile_compound)
+            radius_compound = get_radius(query_vector, sample_embeddings, percentile_compound)
             # 随机生成compound search的topK
             compound_topk = random.randint(3, 10)
             logger.info(f"--- Compound Search (distance < {radius_compound:.2f}, {percentile_compound}th percentile, and sorted, K={compound_topk}) ---")
@@ -629,9 +784,10 @@ def main() -> None:
             logger.info(f"Doris compound search results: {doris_compound_results}")
 
             # 计算compound ground truth（暴力法+距离过滤+排序+topk）
-            dists = np.linalg.norm(embeddings - query_vector, axis=1)
+            # approximate ground truth using sample for compound
+            dists = np.linalg.norm(sample_embeddings - query_vector, axis=1)
             mask = dists < radius_compound
-            filtered_ids = ids[mask]
+            filtered_ids = sample_ids[mask]
             filtered_dists = dists[mask]
             idxs = np.argsort(filtered_dists)[:compound_topk]
             gt_compound = [(int(filtered_ids[i]), float(filtered_dists[i])) for i in idxs]
