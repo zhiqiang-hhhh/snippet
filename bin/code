@@ -1,0 +1,30 @@
+#! /bin/bash
+
+max_retry=10
+
+for i in $(seq 1 $max_retry)
+do
+    # 修改 recent_folder 的路径格式
+    recent_folder=$(ls ~/.vscode-server/cli/servers/ -t | head -n$i | tail -1)
+    echo ${recent_folder}
+    script=$(echo ~/.vscode-server/cli/servers/$recent_folder/server/bin/remote-cli/code)
+    echo ${script}
+    if [[ -z ${script} ]]
+    then
+        echo "VSCode remote script not found"
+        exit 1
+    fi
+    socket=$(ls /run/user/$UID/vscode-ipc-* -t | head -n$i | tail -1)
+    if [[ -z ${socket} ]]
+    then
+        echo "VSCode IPC socket not found"
+        exit 1
+    fi
+    export VSCODE_IPC_HOOK_CLI=${socket}
+    ${script} $@ 2>/dev/null
+    if [ "$?" -eq "0" ]; then
+        exit 0
+    fi
+done
+
+echo "Failed to find valid VS Code window"
