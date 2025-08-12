@@ -3,8 +3,8 @@ set -e
 
 # ========== 配置 ==========
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-WORKSPACE_ROOT="$SCRIPT_DIR/../../workspace/doris"
-CODE_ROOT="$SCRIPT_DIR/../../code"   # 假设 code/doris 在这里
+WORKSPACE_ROOT="$HOME/workspace/doris"
+CODE_ROOT="$HOME/code"   # 假设 code/doris 在这里
 DEFAULT_CODE="doris"                 # 默认二进制目录名
 
 # ========== 函数 ==========
@@ -32,12 +32,14 @@ create_version() {
     ln -snf "$CODE_ROOT/$DEFAULT_CODE/output/be/connectors"  "$asan/connectors"
     ln -snf "$CODE_ROOT/$DEFAULT_CODE/output/be/custom_lib"  "$asan/custom_lib"
     ln -snf "$CODE_ROOT/$DEFAULT_CODE/output/be/dict"        "$asan/dict"
+    ln -snf "$CODE_ROOT/$DEFAULT_CODE/output/be/lib/java_extensions"    "$asan/lib/java_extensions"
     cp -r "$SCRIPT_DIR/base_be_conf" "$asan/conf"
 
     # ---------- RELEASE BE ----------
     local rel="$vdir/RELEASE/be1"
     mkdir -p "$rel/lib"
     ln -snf "$CODE_ROOT/$DEFAULT_CODE/be/build_Release/src/service/doris_be" "$rel/lib/doris_be"
+    ln -snf "$CODE_ROOT/$DEFAULT_CODE/output/be/lib/java_extensions"         "$rel/lib/java_extensions"
     for item in bin conf connectors custom_lib dict log storage; do
         ln -snf "../../ASAN/be1/$item" "$rel/$item"
     done
