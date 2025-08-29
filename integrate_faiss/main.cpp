@@ -36,7 +36,12 @@ int main() {
     std::cout << "Index2 size: " << index2.ntotal << std::endl;
     
     // Merge index2 into index1
-    index1.merge_from(index2, 0);  // 0 means add new IDs starting from index1.ntotal
+    try {
+        index1.merge_from(index2, 0);  // 0 means add new IDs starting from index1.ntotal
+    } catch (faiss::FaissException& e) {
+        std::cerr << "Error during merge: " << e.what() << std::endl;
+    }
+    
     
     std::cout << "\nAfter merge:" << std::endl;
     std::cout << "Index1 size: " << index1.ntotal << std::endl;

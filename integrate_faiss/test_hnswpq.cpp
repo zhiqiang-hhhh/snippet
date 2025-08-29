@@ -1,7 +1,5 @@
-#include "faiss/IndexHNSW.h"
-#include "faiss/IndexPQ.h"
-#include "faiss/IndexHNSWPQ.h"
-#include "faiss/MetricType.h"
+#include <faiss/IndexHNSW.h>
+#include <faiss/MetricType.h>
 #include <iostream>
 #include <vector>
 #include <random>

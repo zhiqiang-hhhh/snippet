@@ -32,21 +32,31 @@ def read_tsv_data(file_path: str) -> Tuple[np.ndarray, np.ndarray]:
         chosen = random.choice(candidates)
         logger.info(f"Randomly selected chunk: {os.path.basename(chosen)} from {file_path}")
         tsv_to_read = chosen
+        # Only read the head (first 100 lines) of the chosen chunk file
+        max_lines = 100
+        with open(tsv_to_read, "r") as f:
+            for i, line in enumerate(f):
+                if i >= max_lines:
+                    break
+                parts = line.strip().split("\t")
+                if len(parts) >= 3:
+                    ids.append(int(parts[0]))
+                    vector = np.array([float(x) for x in parts[2].strip('[]').split(',')], dtype=np.float32)
+                    embeddings.append(vector)
+        return np.array(ids, dtype=np.int64), np.array(embeddings, dtype=np.float32)
     elif os.path.isfile(file_path):
         tsv_to_read = file_path
+        # Read the whole file (original behavior)
+        with open(tsv_to_read, "r") as f:
+            for line in f:
+                parts = line.strip().split("\t")
+                if len(parts) >= 3:
+                    ids.append(int(parts[0]))
+                    vector = np.array([float(x) for x in parts[2].strip('[]').split(',')], dtype=np.float32)
+                    embeddings.append(vector)
+        return np.array(ids, dtype=np.int64), np.array(embeddings, dtype=np.float32)
     else:
         raise ValueError(f"Invalid file_path: {file_path}")
-
-    # Read the selected TSV file
-    with open(tsv_to_read, "r") as f:
-        for line in f:
-            parts = line.strip().split("\t")
-            if len(parts) >= 3:
-                ids.append(int(parts[0]))
-                vector = np.array([float(x) for x in parts[2].strip('[]').split(',')], dtype=np.float32)
-                embeddings.append(vector)
-
-    return np.array(ids, dtype=np.int64), np.array(embeddings, dtype=np.float32)
 
 def get_table_tsv_files(data_dir: str, table: str) -> List[str]:
     """Return a list of TSV files for the given table.
