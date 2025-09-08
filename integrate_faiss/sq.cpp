@@ -1,6 +1,7 @@
 #include "faiss/IndexHNSW.h"
 #include "faiss/IndexScalarQuantizer.h"
 #include "faiss/MetricType.h"
+#include "faiss/impl/HNSW.h"
 #include "faiss/impl/ScalarQuantizer.h"
 #include <faiss/IndexFlat.h>
 
@@ -110,6 +111,8 @@ int main() {
 
     // 预先生成基准查询结果
     std::vector<faiss::idx_t> I_flat_baseline;
+    faiss::SearchParametersHNSW search_params;
+    search_params.efSearch = 100;
     
     for (int run = 0; run < num_runs; ++run) {
         std::cout << "\n--- 运行 " << (run + 1) << "/" << num_runs << " ---" << std::endl;
@@ -142,18 +145,13 @@ int main() {
         index_flat.search(nq, xq.data(), k, D_flat.data(), I_flat.data());
         end = std::chrono::high_resolution_clock::now();
         auto search_time_flat = std::chrono::duration_cast<std::chrono::microseconds>(end - start).count();
-        
-        if (run == 0) {
-            I_flat_baseline = I_flat;  // 第一次运行作为基准
-        }
+
+        I_flat_baseline = I_flat;
         
         flat_result.add_result(build_time_flat, 0, search_time_flat, 1.0);  // 基准召回率为100%
         
         // 2. HNSW (无量化)
         faiss::IndexHNSWFlat index_hnsw(d, M);
-        index_hnsw.hnsw.efConstruction = 200;
-        index_hnsw.hnsw.efSearch = 50;
-        
         start = std::chrono::high_resolution_clock::now();
         index_hnsw.add(nb, xb.data());
         end = std::chrono::high_resolution_clock::now();
@@ -163,7 +161,7 @@ int main() {
         std::vector<float> D_hnsw(nq * k);
         
         start = std::chrono::high_resolution_clock::now();
-        index_hnsw.search(nq, xq.data(), k, D_hnsw.data(), I_hnsw.data());
+        index_hnsw.search(nq, xq.data(), k, D_hnsw.data(), I_hnsw.data(), &search_params);
         end = std::chrono::high_resolution_clock::now();
         auto search_time_hnsw = std::chrono::duration_cast<std::chrono::microseconds>(end - start).count();
         
@@ -171,10 +169,7 @@ int main() {
         hnsw_result.add_result(build_time_hnsw, 0, search_time_hnsw, recall_hnsw);
         
         // 3. HNSW + SQ8
-        faiss::IndexHNSWSQ index_hnsw_sq8(d, faiss::ScalarQuantizer::QT_8bit, M);
-        index_hnsw_sq8.hnsw.efConstruction = 200;
-        index_hnsw_sq8.hnsw.efSearch = 50;
-        
+        faiss::IndexHNSWSQ index_hnsw_sq8(d, faiss::ScalarQuantizer::QT_8bit, M);        
         start = std::chrono::high_resolution_clock::now();
         index_hnsw_sq8.train(nb, xb.data());
         end = std::chrono::high_resolution_clock::now();
@@ -189,7 +184,7 @@ int main() {
         std::vector<float> D_hnsw_sq8(nq * k);
         
         start = std::chrono::high_resolution_clock::now();
-        index_hnsw_sq8.search(nq, xq.data(), k, D_hnsw_sq8.data(), I_hnsw_sq8.data());
+        index_hnsw_sq8.search(nq, xq.data(), k, D_hnsw_sq8.data(), I_hnsw_sq8.data(), &search_params);
         end = std::chrono::high_resolution_clock::now();
         auto search_time_hnsw_sq8 = std::chrono::duration_cast<std::chrono::microseconds>(end - start).count();
         
@@ -198,8 +193,6 @@ int main() {
         
         // 4. HNSW + SQ4
         faiss::IndexHNSWSQ index_hnsw_sq4(d, faiss::ScalarQuantizer::QT_4bit, M);
-        index_hnsw_sq4.hnsw.efConstruction = 200;
-        index_hnsw_sq4.hnsw.efSearch = 50;
         
         start = std::chrono::high_resolution_clock::now();
         index_hnsw_sq4.train(nb, xb.data());
@@ -215,7 +208,7 @@ int main() {
         std::vector<float> D_hnsw_sq4(nq * k);
         
         start = std::chrono::high_resolution_clock::now();
-        index_hnsw_sq4.search(nq, xq.data(), k, D_hnsw_sq4.data(), I_hnsw_sq4.data());
+        index_hnsw_sq4.search(nq, xq.data(), k, D_hnsw_sq4.data(), I_hnsw_sq4.data(), &search_params);
         end = std::chrono::high_resolution_clock::now();
         auto search_time_hnsw_sq4 = std::chrono::duration_cast<std::chrono::microseconds>(end - start).count();
         
