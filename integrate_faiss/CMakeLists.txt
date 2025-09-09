@@ -31,3 +31,6 @@ target_link_libraries(test_hnswpq PRIVATE faiss)
 
 add_executable(sq sq.cpp)
 target_link_libraries(sq PRIVATE faiss)
+
+add_executable(pq_parameter_analysis_simple pq_parameter_analysis_simple.cpp)
+target_link_libraries(pq_parameter_analysis_simple PRIVATE faiss)
