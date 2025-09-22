@@ -1,0 +1,4 @@
+method,params,M,nbits,qtype,hnsw_M,efConstruction,efSearch,code_bytes_per_vec,compression_ratio,build_time,memory_usage_mb,search_time_us,recall_at_1,recall_at_5,recall_at_10
+Flat,Flat,,,,,,,128.0,1.0,0.015210866928100586,61.03515625,440291.94831848145,1.0,1.0,1.0
+SQ,QT_8bit,,,QT_8bit,,,,32.0,4.0,0.017954587936401367,15.2587890625,893.5213088989258,0.96,0.9839999999999999,0.9699999999999999
+SQ,QT_4bit,,,QT_4bit,,,,16.0,8.0,0.02123260498046875,7.62939453125,824.7756958007812,0.66,0.6480000000000002,0.652

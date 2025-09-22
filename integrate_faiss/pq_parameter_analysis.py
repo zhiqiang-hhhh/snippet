@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-量化参数对比分析 Demo：IndexFlat、IndexPQ、IndexSQ
+索引类型对比分析 Demo：IndexFlat、IndexHNSWFlat、IndexHNSWSQ、IndexHNSWPQ
 
-对比内容：
+对比内容（测试指标不变）：
 1. 索引构建时间
-2. 内存使用量（仅编码存储，忽略小量元数据）
+2. 内存使用量（仅编码存储，忽略小量元数据，例如图连边）
 3. 搜索速度
 4. 召回率精度
 
@@ -18,8 +18,31 @@ import time
 import matplotlib.pyplot as plt
 import pandas as pd
 from typing import List, Dict
+import argparse
 import warnings
 warnings.filterwarnings('ignore')
+
+# --- 日志前缀：为所有 print 增加 文件名:行号 前缀 ---
+import builtins
+import inspect
+import os
+
+_ORIG_PRINT = print
+
+def _print_with_lineno(*args, sep=' ', end='\n', file=None, flush=False):
+    """包装内置 print，在前面加上 [filename:lineno] 前缀。"""
+    try:
+        frame = inspect.currentframe()
+        caller = frame.f_back if frame else None
+        lineno = caller.f_lineno if caller else -1
+        filename = os.path.basename(caller.f_code.co_filename) if caller else ''
+        prefix = f"[{filename}:{lineno}] "
+    except Exception:
+        prefix = ''
+    message = sep.join(str(a) for a in args)
+    _ORIG_PRINT(prefix + message, end=end, file=file, flush=flush)
+
+builtins.print = _print_with_lineno
 
 
 class PQBenchmark:
@@ -94,7 +117,7 @@ class PQBenchmark:
         return recall_sum / nq
 
     # -------------------------------
-    # 各索引测试
+    # 各索引测试（基础与HNSW变体）
     # -------------------------------
     def _test_index_flat(self) -> Dict:
         """IndexFlat（无量化）"""
@@ -102,7 +125,8 @@ class PQBenchmark:
 
         start_time = time.time()
         index.add(self.database)
-        build_time = time.time() - start_time
+        add_time = time.time() - start_time
+        build_time = add_time
 
         # 搜索
         start_time = time.time()
@@ -124,8 +148,59 @@ class PQBenchmark:
             'M': None,
             'nbits': None,
             'qtype': None,
+            'hnsw_M': None,
+            'efConstruction': None,
+            'efSearch': None,
             'code_bytes_per_vec': code_bytes_per_vec,
             'compression_ratio': compression_ratio,
+            'train_time': 0.0,
+            'add_time': add_time,
+            'build_time': build_time,
+            'memory_usage_mb': memory_usage_mb,
+            'search_time_us': search_time,
+            'recall_at_1': recall_1,
+            'recall_at_5': recall_5,
+            'recall_at_10': recall_10
+        }
+
+    def _test_index_hnsw_flat(self, hnsw_M: int = 32, ef_construction: int = 200, ef_search: int = 64) -> Dict:
+        """IndexHNSWFlat（HNSW 图 + float32 存储）"""
+        index = faiss.IndexHNSWFlat(self.dim, hnsw_M)
+        # 配置 HNSW 参数
+        index.hnsw.efConstruction = ef_construction
+        index.hnsw.efSearch = ef_search
+
+        start_time = time.time()
+        # HNSW Flat 不需要训练，直接 add
+        index.add(self.database)
+        add_time = time.time() - start_time
+        build_time = add_time
+
+        start_time = time.time()
+        distances, labels = index.search(self.queries, self.k)
+        search_time = (time.time() - start_time) * 1e6 / self.nq
+
+        recall_1 = self._compute_recall(labels[:, :1], self.ground_truth[:, :1])
+        recall_5 = self._compute_recall(labels[:, :5], self.ground_truth[:, :5])
+        recall_10 = self._compute_recall(labels[:, :10], self.ground_truth[:, :10])
+
+        code_bytes_per_vec = self._flat_code_bytes_per_vec()
+        memory_usage_mb = self.nb * code_bytes_per_vec / (1024 * 1024)
+        compression_ratio = (self.dim * 4.0) / code_bytes_per_vec
+
+        return {
+            'method': 'HNSW-Flat',
+            'params': f'HNSW_M={hnsw_M}, efS={ef_search}',
+            'M': None,
+            'nbits': None,
+            'qtype': None,
+            'hnsw_M': hnsw_M,
+            'efConstruction': ef_construction,
+            'efSearch': ef_search,
+            'code_bytes_per_vec': code_bytes_per_vec,
+            'compression_ratio': compression_ratio,
+            'train_time': 0.0,
+            'add_time': add_time,
             'build_time': build_time,
             'memory_usage_mb': memory_usage_mb,
             'search_time_us': search_time,
@@ -169,8 +244,13 @@ class PQBenchmark:
             'M': m,
             'nbits': nbits,
             'qtype': None,
+            'hnsw_M': None,
+            'efConstruction': None,
+            'efSearch': None,
             'code_bytes_per_vec': code_bytes_per_vec,
             'compression_ratio': compression_ratio,
+            'train_time': build_train,
+            'add_time': build_add,
             'build_time': build_time,
             'memory_usage_mb': memory_usage_mb,
             'search_time_us': search_time,
@@ -225,8 +305,123 @@ class PQBenchmark:
             'M': None,
             'nbits': None,
             'qtype': qname,
+            'hnsw_M': None,
+            'efConstruction': None,
+            'efSearch': None,
             'code_bytes_per_vec': code_bytes_per_vec,
             'compression_ratio': compression_ratio,
+            'train_time': build_train,
+            'add_time': build_add,
+            'build_time': build_time,
+            'memory_usage_mb': memory_usage_mb,
+            'search_time_us': search_time,
+            'recall_at_1': recall_1,
+            'recall_at_5': recall_5,
+            'recall_at_10': recall_10
+        }
+
+    def _test_index_hnsw_sq(self, hnsw_M: int, qtype: int, ef_construction: int = 200, ef_search: int = 64) -> Dict:
+        """IndexHNSWSQ（HNSW 图 + 标量量化）"""
+        # 注意 SWIG 绑定签名：IndexHNSWSQ(d, qtype, M)
+        index = faiss.IndexHNSWSQ(self.dim, qtype, hnsw_M)
+        index.hnsw.efConstruction = ef_construction
+        index.hnsw.efSearch = ef_search
+
+        start_time = time.time()
+        index.train(self.database)
+        build_train = time.time() - start_time
+
+        start_time = time.time()
+        index.add(self.database)
+        build_add = time.time() - start_time
+        build_time = build_train + build_add
+
+        start_time = time.time()
+        distances, labels = index.search(self.queries, self.k)
+        search_time = (time.time() - start_time) * 1e6 / self.nq
+
+        recall_1 = self._compute_recall(labels[:, :1], self.ground_truth[:, :1])
+        recall_5 = self._compute_recall(labels[:, :5], self.ground_truth[:, :5])
+        recall_10 = self._compute_recall(labels[:, :10], self.ground_truth[:, :10])
+
+        code_bytes_per_vec = self._sq_code_bytes_per_vec(qtype)
+        memory_usage_mb = self.nb * code_bytes_per_vec / (1024 * 1024)
+        compression_ratio = (self.dim * 4.0) / code_bytes_per_vec
+
+        QT = faiss.ScalarQuantizer
+        qtype_name_map = {
+            QT.QT_8bit: 'QT_8bit',
+            QT.QT_4bit: 'QT_4bit',
+            QT.QT_8bit_uniform: 'QT_8bit_uniform',
+            QT.QT_fp16: 'QT_fp16',
+            getattr(QT, 'QT_8bit_direct', -1): 'QT_8bit_direct'
+        }
+        qname = qtype_name_map.get(qtype, str(qtype))
+
+        return {
+            'method': 'HNSW-SQ',
+            'params': f'HNSW_M={hnsw_M}, {qname}, efS={ef_search}',
+            'M': None,
+            'nbits': None,
+            'qtype': qname,
+            'hnsw_M': hnsw_M,
+            'efConstruction': ef_construction,
+            'efSearch': ef_search,
+            'code_bytes_per_vec': code_bytes_per_vec,
+            'compression_ratio': compression_ratio,
+            'train_time': build_train,
+            'add_time': build_add,
+            'build_time': build_time,
+            'memory_usage_mb': memory_usage_mb,
+            'search_time_us': search_time,
+            'recall_at_1': recall_1,
+            'recall_at_5': recall_5,
+            'recall_at_10': recall_10
+        }
+
+    def _test_index_hnsw_pq(self, hnsw_M: int, m: int, nbits: int, ef_construction: int = 200, ef_search: int = 64) -> Dict:
+        """IndexHNSWPQ（HNSW 图 + 产品量化）"""
+        index = faiss.IndexHNSWPQ(self.dim, hnsw_M, m, nbits)
+        index.hnsw.efConstruction = ef_construction
+        index.hnsw.efSearch = ef_search
+
+        # 训练 + 添加
+        start_time = time.time()
+        index.train(self.database)
+        build_train = time.time() - start_time
+
+        start_time = time.time()
+        index.add(self.database)
+        build_add = time.time() - start_time
+        build_time = build_train + build_add
+
+        # 搜索
+        start_time = time.time()
+        distances, labels = index.search(self.queries, self.k)
+        search_time = (time.time() - start_time) * 1e6 / self.nq
+
+        # 召回
+        recall_1 = self._compute_recall(labels[:, :1], self.ground_truth[:, :1])
+        recall_5 = self._compute_recall(labels[:, :5], self.ground_truth[:, :5])
+        recall_10 = self._compute_recall(labels[:, :10], self.ground_truth[:, :10])
+
+        code_bytes_per_vec = self._pq_code_bytes_per_vec(m, nbits)
+        memory_usage_mb = self.nb * code_bytes_per_vec / (1024 * 1024)
+        compression_ratio = (self.dim * 4.0) / code_bytes_per_vec
+
+        return {
+            'method': 'HNSW-PQ',
+            'params': f'HNSW_M={hnsw_M}, PQ(M={m},nbits={nbits}), efS={ef_search}',
+            'M': m,
+            'nbits': nbits,
+            'qtype': None,
+            'hnsw_M': hnsw_M,
+            'efConstruction': ef_construction,
+            'efSearch': ef_search,
+            'code_bytes_per_vec': code_bytes_per_vec,
+            'compression_ratio': compression_ratio,
+            'train_time': build_train,
+            'add_time': build_add,
             'build_time': build_time,
             'memory_usage_mb': memory_usage_mb,
             'search_time_us': search_time,
@@ -238,21 +433,27 @@ class PQBenchmark:
     # -------------------------------
     # 主测试入口
     # -------------------------------
-    def test_quantizers(
+    def test_index_types(
         self,
-        pq_m_values: List[int],
-        pq_nbits_values: List[int],
-        sq_qtypes: List[int]
+        hnsw_M: int = 32,
+        ef_construction: int = 200,
+        ef_search: int = 64,
+        pq_m: int = 16,
+        pq_nbits: int = 8,
+        sq_qtype: int = None,
     ) -> pd.DataFrame:
         """
-        对比 IndexFlat、IndexPQ（多组 M/nbits）、IndexSQ（多种 qtype）
+        对比四种索引：IndexFlat、IndexHNSWFlat、IndexHNSWSQ、IndexHNSWPQ
+        - 测试指标不变（构建时间、编码内存、搜索时间、召回率）
+        - HNSW 参数使用统一配置：M、efConstruction、efSearch
+        - SQ/PQ 使用单点配置，便于直接对比不同索引类型
         """
         results = []
 
-        print("\n开始测试 IndexFlat / IndexPQ / IndexSQ")
+        print("\n开始测试 IndexFlat / IndexHNSWFlat / IndexHNSWSQ / IndexHNSWPQ")
         print("=" * 80)
 
-        # 1) IndexFlat
+        # IndexFlat
         try:
             print("\n测试 IndexFlat ...")
             res = self._test_index_flat()
@@ -261,30 +462,102 @@ class PQBenchmark:
         except Exception as e:
             print(f"IndexFlat 测试失败: {e}")
 
-        # 2) IndexPQ：网格测试
-        print("\n测试 IndexPQ 参数网格 ...")
-        for m in pq_m_values:
-            if self.dim % m != 0:
-                print(f"跳过 M={m}: 维度{self.dim}不能被M整除")
-                continue
-            for nbits in pq_nbits_values:
-                try:
-                    print(f"- PQ: M={m}, nbits={nbits} (子向量维度: {self.dim//m})")
-                    res = self._test_index_pq(m, nbits)
-                    results.append(res)
-                    print(f"  搜索: {res['search_time_us']:.1f}μs, 召回@10: {res['recall_at_10']:.3f}, 压缩比: {res['compression_ratio']:.1f}x")
-                except Exception as e:
-                    print(f"  PQ(M={m}, nbits={nbits}) 测试失败: {e}")
+        # IndexHNSWFlat
+        try:
+            print(f"\n测试 IndexHNSWFlat (M={hnsw_M}, efC={ef_construction}, efS={ef_search}) ...")
+            res = self._test_index_hnsw_flat(hnsw_M, ef_construction, ef_search)
+            results.append(res)
+            print(f"HNSW-Flat 搜索: {res['search_time_us']:.1f}μs, 召回@10: {res['recall_at_10']:.3f}")
+        except Exception as e:
+            print(f"IndexHNSWFlat 测试失败: {e}")
 
-        # 3) IndexSQ：多 qtype
-        print("\n测试 IndexSQ 多种量化类型 ...")
-        for qt in sq_qtypes:
+        # IndexHNSWSQ（默认 SQ8）
+        QT = faiss.ScalarQuantizer
+        if sq_qtype is None:
+            sq_qtype = QT.QT_8bit
+        try:
+            print(f"\n测试 IndexHNSWSQ (M={hnsw_M}, qtype={sq_qtype}, efC={ef_construction}, efS={ef_search}) ...")
+            res = self._test_index_hnsw_sq(hnsw_M, sq_qtype, ef_construction, ef_search)
+            results.append(res)
+            print(f"HNSW-SQ 搜索: {res['search_time_us']:.1f}μs, 召回@10: {res['recall_at_10']:.3f}, 压缩比: {res['compression_ratio']:.1f}x")
+        except Exception as e:
+            print(f"IndexHNSWSQ 测试失败: {e}")
+
+        # IndexHNSWPQ（默认 PQ(m=16, nbits=8)）
+        if self.dim % pq_m != 0:
+            print(f"跳过 HNSW-PQ: 维度{self.dim}不能被M={pq_m}整除")
+        else:
             try:
-                res = self._test_index_sq(qt)
+                print(f"\n测试 IndexHNSWPQ (HNSW_M={hnsw_M}, PQ(M={pq_m}, nbits={pq_nbits}), efC={ef_construction}, efS={ef_search}) ...")
+                res = self._test_index_hnsw_pq(hnsw_M, pq_m, pq_nbits, ef_construction, ef_search)
                 results.append(res)
-                print(f"- SQ {res['params']}: 搜索 {res['search_time_us']:.1f}μs, 召回@10 {res['recall_at_10']:.3f}, 压缩比 {res['compression_ratio']:.1f}x")
+                print(f"HNSW-PQ 搜索: {res['search_time_us']:.1f}μs, 召回@10: {res['recall_at_10']:.3f}, 压缩比: {res['compression_ratio']:.1f}x")
             except Exception as e:
-                print(f"  SQ(qtype={qt}) 测试失败: {e}")
+                print(f"IndexHNSWPQ 测试失败: {e}")
+
+        return pd.DataFrame(results)
+
+    def test_index_types_grid(
+        self,
+        hnsw_M_list: List[int],
+        ef_construction: int,
+        ef_search_list: List[int],
+        pq_m_list: List[int],
+        pq_nbits_list: List[int],
+        sq_qtypes: List[int],
+    ) -> pd.DataFrame:
+        """
+        批量对比：IndexFlat、IndexHNSWFlat(M,efS)、IndexHNSWSQ(M,efS,qtype)、IndexHNSWPQ(M,efS,PQ)
+        - 采用笛卡尔组合作为网格：hnsw_M × ef_search × (sq_qtypes ∪ pq组合)
+        - IndexFlat 只测一次，作为基线
+        """
+        results = []
+        print("\n开始测试 IndexFlat / IndexHNSWFlat / IndexHNSWSQ / IndexHNSWPQ (Grid)")
+        print("=" * 80)
+
+        # Flat baseline
+        try:
+            res = self._test_index_flat()
+            results.append(res)
+            print(f"Flat 搜索时间: {res['search_time_us']:.1f}μs, 召回@10: {res['recall_at_10']:.3f}")
+        except Exception as e:
+            print(f"IndexFlat 测试失败: {e}")
+
+        # HNSW sweeps
+        for hM in hnsw_M_list:
+            for efS in ef_search_list:
+                # HNSW-Flat
+                try:
+                    print(f"\n测试 IndexHNSWFlat (M={hM}, efC={ef_construction}, efS={efS}) ...")
+                    res = self._test_index_hnsw_flat(hM, ef_construction, efS)
+                    results.append(res)
+                    print(f"HNSW-Flat 搜索: {res['search_time_us']:.1f}μs, 召回@10: {res['recall_at_10']:.3f}")
+                except Exception as e:
+                    print(f"IndexHNSWFlat 测试失败: {e}")
+
+                # HNSW-SQ for each qtype
+                for qt in sq_qtypes:
+                    try:
+                        print(f"测试 IndexHNSWSQ (M={hM}, qtype={qt}, efC={ef_construction}, efS={efS}) ...")
+                        res = self._test_index_hnsw_sq(hM, qt, ef_construction, efS)
+                        results.append(res)
+                        print(f"HNSW-SQ 搜索: {res['search_time_us']:.1f}μs, 召回@10: {res['recall_at_10']:.3f}, 压缩比: {res['compression_ratio']:.1f}x")
+                    except Exception as e:
+                        print(f"IndexHNSWSQ 测试失败: {e}")
+
+                # HNSW-PQ for each PQ combo
+                for m in pq_m_list:
+                    if self.dim % m != 0:
+                        print(f"跳过 HNSW-PQ: 维度{self.dim}不能被M={m}整除")
+                        continue
+                    for nbits in pq_nbits_list:
+                        try:
+                            print(f"测试 IndexHNSWPQ (HNSW_M={hM}, PQ(M={m}, nbits={nbits}), efC={ef_construction}, efS={efS}) ...")
+                            res = self._test_index_hnsw_pq(hM, m, nbits, ef_construction, efS)
+                            results.append(res)
+                            print(f"HNSW-PQ 搜索: {res['search_time_us']:.1f}μs, 召回@10: {res['recall_at_10']:.3f}, 压缩比: {res['compression_ratio']:.1f}x")
+                        except Exception as e:
+                            print(f"IndexHNSWPQ 测试失败: {e}")
 
         return pd.DataFrame(results)
 
@@ -294,10 +567,19 @@ class PQBenchmark:
     def plot_results(self, results_df: pd.DataFrame, save_path: str = None):
         """绘制结果图表"""
         methods = results_df['method'].unique()
-        colors = {'Flat': 'black', 'PQ': 'tab:blue', 'SQ': 'tab:orange'}
+        colors = {
+            'Flat': 'black',
+            'HNSW-Flat': 'tab:green',
+            'HNSW-SQ': 'tab:red',
+            'HNSW-PQ': 'tab:purple',
+            # 兼容旧方法
+            'PQ': 'tab:blue',
+            'SQ': 'tab:orange',
+        }
 
         fig, axes = plt.subplots(1, 3, figsize=(20, 6))
-        fig.suptitle('IndexFlat / IndexPQ / IndexSQ 量化对比', fontsize=16, fontweight='bold')
+        title = ' / '.join(methods)
+        fig.suptitle(f'{title} 对比', fontsize=16, fontweight='bold')
 
         # 1. 压缩比（越大越省存储）
         for m in methods:
@@ -336,7 +618,8 @@ class PQBenchmark:
     def print_analysis_summary(self, results_df: pd.DataFrame):
         """打印分析总结"""
         print("\n" + "=" * 80)
-        print("IndexFlat / IndexPQ / IndexSQ 量化对比分析总结")
+        title = ' / '.join(results_df['method'].unique())
+        print(f"{title} 对比分析总结")
         print("=" * 80)
 
         # 找到若干代表性最优点
@@ -350,59 +633,202 @@ class PQBenchmark:
         except Exception:
             pass
 
-        cols = ['method', 'params', 'compression_ratio', 'memory_usage_mb', 'build_time', 'search_time_us', 'recall_at_10']
+        cols = ['method', 'params', 'compression_ratio', 'memory_usage_mb', 'train_time', 'add_time', 'build_time', 'search_time_us', 'recall_at_10']
         print("\n详细结果（部分列）：")
         print(results_df[cols].sort_values(['method', 'params']).to_string(index=False))
+
+    # -------------------------------
+    # PQ / SQ 单独测试入口
+    # -------------------------------
+    def test_pq_grid(self, pq_m_values: List[int], pq_nbits_values: List[int], include_flat: bool = True) -> pd.DataFrame:
+        """仅测试 IndexPQ 参数网格，可选包含 Flat 基线"""
+        results = []
+        if include_flat:
+            try:
+                res = self._test_index_flat()
+                results.append(res)
+                print(f"Flat: 搜索 {res['search_time_us']:.1f}μs, R@10 {res['recall_at_10']:.3f}")
+            except Exception as e:
+                print(f"Flat 测试失败: {e}")
+
+        print("\n测试 IndexPQ 参数网格 ...")
+        for m in pq_m_values:
+            if self.dim % m != 0:
+                print(f"跳过 M={m}: 维度{self.dim}不能被M整除")
+                continue
+            for nbits in pq_nbits_values:
+                try:
+                    res = self._test_index_pq(m, nbits)
+                    results.append(res)
+                    print(f"PQ(M={m}, nbits={nbits}): 搜索 {res['search_time_us']:.1f}μs, R@10 {res['recall_at_10']:.3f}, 压缩比 {res['compression_ratio']:.1f}x")
+                except Exception as e:
+                    print(f"PQ(M={m}, nbits={nbits}) 测试失败: {e}")
+        return pd.DataFrame(results)
+
+    def test_sq_types(self, sq_qtypes: List[int], include_flat: bool = True) -> pd.DataFrame:
+        """仅测试 IndexSQ 多种 qtype，可选包含 Flat 基线"""
+        results = []
+        if include_flat:
+            try:
+                res = self._test_index_flat()
+                results.append(res)
+                print(f"Flat: 搜索 {res['search_time_us']:.1f}μs, R@10 {res['recall_at_10']:.3f}")
+            except Exception as e:
+                print(f"Flat 测试失败: {e}")
+
+        print("\n测试 IndexSQ 多种量化类型 ...")
+        for qt in sq_qtypes:
+            try:
+                res = self._test_index_sq(qt)
+                results.append(res)
+                print(f"SQ({res['params']}): 搜索 {res['search_time_us']:.1f}μs, R@10 {res['recall_at_10']:.3f}, 压缩比 {res['compression_ratio']:.1f}x")
+            except Exception as e:
+                print(f"SQ(qtype={qt}) 测试失败: {e}")
+        return pd.DataFrame(results)
 
 
 def main():
     """主函数"""
-    print("🚀 量化参数对比分析（IndexFlat / IndexPQ / IndexSQ）")
-    print("=" * 80)
+    parser = argparse.ArgumentParser(description='Faiss 索引基准测试')
+    parser.add_argument('--mode', choices=['index_types', 'pq', 'sq'], default='index_types', help='选择测试模式')
+    parser.add_argument('--dim', type=int, default=128)
+    parser.add_argument('--nb', type=int, default=50000)
+    parser.add_argument('--nq', type=int, default=1000)
+    parser.add_argument('--k', type=int, default=10)
+
+    # HNSW params
+    parser.add_argument('--hnsw-M', dest='hnsw_M', type=str, default='32', help='HNSW 的 M，支持逗号分隔: 16,32')
+    parser.add_argument('--efC', dest='ef_construction', type=int, default=200)
+    parser.add_argument('--efS', dest='ef_search', type=str, default='64', help='HNSW 的 efSearch，支持逗号分隔: 32,64,128')
+
+    # PQ params
+    parser.add_argument('--pq-m', dest='pq_m', type=str, default='16', help='HNSW-PQ 用的 m 或 PQ 单测默认 m；支持逗号分隔如: 4,16,32')
+    parser.add_argument('--pq-nbits', dest='pq_nbits', type=str, default='8', help='HNSW-PQ 用的 nbits 或 PQ 单测默认 nbits；支持逗号分隔如: 4,8')
+    parser.add_argument('--pq-m-grid', dest='pq_m_grid', type=int, nargs='+', default=None, help='PQ 单测的 M 网格，如: --pq-m-grid 4 16 32')
+    parser.add_argument('--pq-nbits-grid', dest='pq_nbits_grid', type=int, nargs='+', default=None, help='PQ 单测的 nbits 网格，如: --pq-nbits-grid 4 8')
+
+    # SQ params
+    parser.add_argument('--sq-qtypes', dest='sq_qtypes', nargs='+', default=None, help='SQ 单测的 qtypes，可用名称: QT_8bit, QT_4bit, QT_8bit_uniform, QT_fp16, QT_8bit_direct')
+
+    args = parser.parse_args()
 
     # 初始化基准测试
-    benchmark = PQBenchmark(
-        dim=128,        # 128维向量
-        nb=50000,     # 2555904个数据库向量（注意：较大，运行时间较长）
-        nq=1000,        # 1000个查询向量
-        k=10            # 搜索前10个邻居
-    )
+    benchmark = PQBenchmark(dim=args.dim, nb=args.nb, nq=args.nq, k=args.k)
 
-    # PQ 参数网格（M 需整除 dim）
-    pq_m_values = [1, 4, 16, 32]
-    pq_nbits_values = [4, 8]
+    def _parse_csv_ints(val: str) -> list:
+        if val is None:
+            return []
+        parts = []
+        for token in str(val).split(','):
+            token = token.strip()
+            if token == '':
+                continue
+            if not token.lstrip('-').isdigit():
+                raise ValueError(f"期望整数列表，得到: {val}")
+            parts.append(int(token))
+        return parts
 
-    # SQ 量化类型
-    QT = faiss.ScalarQuantizer
-    sq_qtypes = [
-        QT.QT_8bit,
-        QT.QT_4bit,
-        getattr(QT, 'QT_8bit_direct', None),
-    ]
-    sq_qtypes = [qt for qt in sq_qtypes if qt is not None]
+    if args.mode == 'index_types':
+        print("🚀 索引类型对比分析（IndexFlat / IndexHNSWFlat / IndexHNSWSQ / IndexHNSWPQ）")
+        print("=" * 80)
+        # 解析参数列表
+        hnsw_M_list = _parse_csv_ints(args.hnsw_M) or [32]
+        ef_search_list = _parse_csv_ints(args.ef_search) or [64]
+        pq_m_list = _parse_csv_ints(args.pq_m) or [16]
+        pq_nbits_list = _parse_csv_ints(args.pq_nbits) or [8]
+        # SQ qtypes：沿用 sq 模式的解析逻辑
+        QT = faiss.ScalarQuantizer
+        name_to_qt = {
+            'QT_8bit': getattr(QT, 'QT_8bit', 0),
+            'QT_4bit': getattr(QT, 'QT_4bit', 1),
+            'QT_8bit_uniform': getattr(QT, 'QT_8bit_uniform', 2),
+            'QT_fp16': getattr(QT, 'QT_fp16', 3),
+            'QT_8bit_direct': getattr(QT, 'QT_8bit_direct', None),
+        }
+        # 默认只测 SQ8
+        sq_qtypes = [name_to_qt['QT_8bit']]
+        # 如果用户通过 --sq-qtypes 传了值，则覆盖默认
+        if args.sq_qtypes is not None:
+            sq_qtypes = []
+            for token in args.sq_qtypes:
+                for sub in str(token).split(','):
+                    sub = sub.strip()
+                    if sub == '':
+                        continue
+                    if sub.isdigit():
+                        sq_qtypes.append(int(sub))
+                    else:
+                        qt_val = name_to_qt.get(sub)
+                        if qt_val is not None:
+                            sq_qtypes.append(qt_val)
+            sq_qtypes = [qt for qt in sq_qtypes if qt is not None]
 
-    print(f"\n🔬 开始测试 PQ(M×nbits)与 SQ(qtype):")
-    print(f"PQ M 值: {pq_m_values}")
-    print(f"PQ nbits 值: {pq_nbits_values}")
-    print(f"SQ qtypes: {sq_qtypes}")
+        # 运行网格测试
+        print(f"HNSW_M: {hnsw_M_list}  | efC: {args.ef_construction}  | efS: {ef_search_list}")
+        print(f"HNSW-PQ: M={pq_m_list}, nbits={pq_nbits_list}  | HNSW-SQ qtypes: {sq_qtypes}")
+        results_df = benchmark.test_index_types_grid(
+            hnsw_M_list=hnsw_M_list,
+            ef_construction=args.ef_construction,
+            ef_search_list=ef_search_list,
+            pq_m_list=pq_m_list,
+            pq_nbits_list=pq_nbits_list,
+            sq_qtypes=sq_qtypes,
+        )
+        out_csv = 'index_types_benchmark_results.csv'
+        out_png = 'index_types_benchmark_analysis.png'
 
-    # 运行基准测试
-    results_df = benchmark.test_quantizers(
-        pq_m_values=pq_m_values,
-        pq_nbits_values=pq_nbits_values,
-        sq_qtypes=sq_qtypes
-    )
+    elif args.mode == 'pq':
+        print("🚀 PQ 单独测试（IndexPQ 参数网格）")
+        print("=" * 80)
+        pq_m_values = args.pq_m_grid if args.pq_m_grid else _parse_csv_ints(args.pq_m)
+        pq_nbits_values = args.pq_nbits_grid if args.pq_nbits_grid else _parse_csv_ints(args.pq_nbits)
+        if not pq_m_values:
+            pq_m_values = [16]
+        if not pq_nbits_values:
+            pq_nbits_values = [8]
+        print(f"PQ M 值: {pq_m_values}")
+        print(f"PQ nbits 值: {pq_nbits_values}")
+        results_df = benchmark.test_pq_grid(pq_m_values, pq_nbits_values, include_flat=True)
+        out_csv = 'pq_benchmark_results.csv'
+        out_png = 'pq_benchmark_analysis.png'
 
-    # 保存结果
-    results_df.to_csv('quantizer_benchmark_results.csv', index=False)
-    print(f"\n💾 结果已保存到: quantizer_benchmark_results.csv")
+    else:  # sq
+        print("🚀 SQ 单独测试（IndexSQ 多 qtype）")
+        print("=" * 80)
+        QT = faiss.ScalarQuantizer
+        name_to_qt = {
+            'QT_8bit': getattr(QT, 'QT_8bit', 0),
+            'QT_4bit': getattr(QT, 'QT_4bit', 1),
+            'QT_8bit_uniform': getattr(QT, 'QT_8bit_uniform', 2),
+            'QT_fp16': getattr(QT, 'QT_fp16', 3),
+            'QT_8bit_direct': getattr(QT, 'QT_8bit_direct', None),
+        }
+        if args.sq_qtypes is None:
+            sq_qtypes = [name_to_qt['QT_8bit'], name_to_qt['QT_4bit']]
+        else:
+            sq_qtypes = []
+            for token in args.sq_qtypes:
+                for sub in str(token).split(','):
+                    sub = sub.strip()
+                    if sub == '':
+                        continue
+                    if sub.isdigit():
+                        sq_qtypes.append(int(sub))
+                    else:
+                        qt_val = name_to_qt.get(sub)
+                        if qt_val is not None:
+                            sq_qtypes.append(qt_val)
+        sq_qtypes = [qt for qt in sq_qtypes if qt is not None]
+        print(f"SQ qtypes: {sq_qtypes}")
+        results_df = benchmark.test_sq_types(sq_qtypes, include_flat=True)
+        out_csv = 'sq_benchmark_results.csv'
+        out_png = 'sq_benchmark_analysis.png'
 
-    # 绘制图表
-    benchmark.plot_results(results_df, 'quantizer_benchmark_analysis.png')
-
-    # 打印分析总结
+    # 保存结果与图表、总结
+    results_df.to_csv(out_csv, index=False)
+    print(f"\n💾 结果已保存到: {out_csv}")
+    benchmark.plot_results(results_df, out_png)
     benchmark.print_analysis_summary(results_df)
-
     print(f"\n✅ 分析完成！")
 
 
