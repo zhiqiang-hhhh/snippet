@@ -29,6 +29,7 @@ struct Options {
     // PQ (for HNSW-PQ)
     int pq_m = 16;
     int pq_nbits = 8;
+    double pq_train_ratio = 1.0; // fraction of nb used for PQ training [0,1]
 
     // SQ (for HNSW-SQ)
     int sq_qtype = (int)faiss::ScalarQuantizer::QuantizerType::QT_8bit;
@@ -120,6 +121,8 @@ public:
         int pq_nbits = 0;
         int qtype = -1;           // for SQ
 
+        double train_time = 0.0;  // seconds
+        double add_time = 0.0;    // seconds
         double build_time = 0.0;  // train + add seconds
         double search_time_ms = 0.0; // per query
         double recall_1 = 0.0;
@@ -154,17 +157,23 @@ public:
         try {
             faiss::IndexHNSWFlat index(dim, hnsw_m);
             index.hnsw.efConstruction = efC;
-            auto t0 = std::chrono::high_resolution_clock::now();
+            // no train for HNSW-Flat
+            r.train_time = 0.0;
+            auto t_add0 = std::chrono::high_resolution_clock::now();
             index.add(nb, database.data());
-            auto t1 = std::chrono::high_resolution_clock::now();
-            r.build_time = std::chrono::duration<double>(t1 - t0).count();
+            auto t_add1 = std::chrono::high_resolution_clock::now();
+            r.add_time = std::chrono::duration<double>(t_add1 - t_add0).count();
+            r.build_time = r.train_time + r.add_time;
+            std::cout << std::fixed << std::setprecision(3)
+                      << "    训练(train)= " << r.train_time << " s, 建索引(add)= " << r.add_time
+                      << " s, 总构建= " << r.build_time << " s" << std::endl;
 
             index.hnsw.efSearch = efS;
             std::vector<float> distances(nq * k);
             std::vector<faiss::idx_t> labels(nq * k);
-            t0 = std::chrono::high_resolution_clock::now();
+            auto t0 = std::chrono::high_resolution_clock::now();
             index.search(nq, queries.data(), k, distances.data(), labels.data());
-            t1 = std::chrono::high_resolution_clock::now();
+            auto t1 = std::chrono::high_resolution_clock::now();
             r.search_time_ms = std::chrono::duration<double, std::milli>(t1 - t0).count() / nq;
 
             r.recall_1 = computeRecall(labels, ground_truth, 1);
@@ -193,9 +202,16 @@ public:
             index.hnsw.efConstruction = efC;
             auto t0 = std::chrono::high_resolution_clock::now();
             index.train(nb, database.data());
-            index.add(nb, database.data());
             auto t1 = std::chrono::high_resolution_clock::now();
-            r.build_time = std::chrono::duration<double>(t1 - t0).count();
+            r.train_time = std::chrono::duration<double>(t1 - t0).count();
+            auto t2 = std::chrono::high_resolution_clock::now();
+            index.add(nb, database.data());
+            auto t3 = std::chrono::high_resolution_clock::now();
+            r.add_time = std::chrono::duration<double>(t3 - t2).count();
+            r.build_time = r.train_time + r.add_time;
+            std::cout << std::fixed << std::setprecision(3)
+                      << "    训练(train)= " << r.train_time << " s, 建索引(add)= " << r.add_time
+                      << " s, 总构建= " << r.build_time << " s" << std::endl;
 
             index.hnsw.efSearch = efS;
             std::vector<float> distances(nq * k);
@@ -232,8 +248,8 @@ public:
     }
 
     // HNSW-PQ
-    TestResult testHNSWPQ(int pq_m, int pq_nbits, int hnsw_m, int efC, int efS) {
-        std::cout << "  测试 IndexHNSWPQ (M=" << hnsw_m << ", PQ(m=" << pq_m << ", nbits=" << pq_nbits << "), efC=" << efC << ", efS=" << efS << ")..." << std::endl;
+    TestResult testHNSWPQ(int pq_m, int pq_nbits, int hnsw_m, int efC, int efS, double train_ratio) {
+        std::cout << "  测试 IndexHNSWPQ (M=" << hnsw_m << ", PQ(m=" << pq_m << ", nbits=" << pq_nbits << "), efC=" << efC << ", efS=" << efS << ", tr=" << train_ratio << ")..." << std::endl;
         TestResult r{};
         r.method = "HNSW-PQ";
         r.params = "HNSW_M=" + std::to_string(hnsw_m) + ", PQ(m=" + std::to_string(pq_m) + ",nbits=" + std::to_string(pq_nbits) + ")";
@@ -245,11 +261,27 @@ public:
             }
             faiss::IndexHNSWPQ index(dim, pq_m, hnsw_m, pq_nbits);
             index.hnsw.efConstruction = efC;
+            // Decide training subset size based on ratio
+            int train_n = (int)std::llround((double)nb * train_ratio);
+            if (train_n < 1) train_n = 1;
+            if (train_n > nb) train_n = nb;
+            if (train_n < nb) {
+                std::ostringstream oss;
+                oss << std::fixed << std::setprecision(3) << (double)train_n / (double)nb;
+                std::cout << "    使用训练样本: " << train_n << "/" << nb << " (ratio=" << oss.str() << ")" << std::endl;
+            }
             auto t0 = std::chrono::high_resolution_clock::now();
-            index.train(nb, database.data());
-            index.add(nb, database.data());
+            index.train(train_n, database.data());
             auto t1 = std::chrono::high_resolution_clock::now();
-            r.build_time = std::chrono::duration<double>(t1 - t0).count();
+            r.train_time = std::chrono::duration<double>(t1 - t0).count();
+            auto t2 = std::chrono::high_resolution_clock::now();
+            index.add(nb, database.data());
+            auto t3 = std::chrono::high_resolution_clock::now();
+            r.add_time = std::chrono::duration<double>(t3 - t2).count();
+            r.build_time = r.train_time + r.add_time;
+            std::cout << std::fixed << std::setprecision(3)
+                      << "    训练(train)= " << r.train_time << " s, 建索引(add)= " << r.add_time
+                      << " s, 总构建= " << r.build_time << " s" << std::endl;
 
             index.hnsw.efSearch = efS;
             std::vector<float> distances(nq * k);
@@ -312,7 +344,7 @@ public:
             if (r.build_time >= 0) results.push_back(r);
         }
         if (contains("hnsw_pq")) {
-            auto r = testHNSWPQ(opt.pq_m, opt.pq_nbits, opt.hnsw_M, opt.efC, opt.efS);
+            auto r = testHNSWPQ(opt.pq_m, opt.pq_nbits, opt.hnsw_M, opt.efC, opt.efS, opt.pq_train_ratio);
             if (r.build_time >= 0) results.push_back(r);
         }
         return results;
@@ -329,19 +361,30 @@ public:
         // Best by recall and fastest
         auto best_recall = *std::max_element(results.begin(), results.end(), [](const TestResult& a, const TestResult& b){ return a.recall_10 < b.recall_10; });
         auto fastest = *std::min_element(results.begin(), results.end(), [](const TestResult& a, const TestResult& b){ return a.search_time_ms < b.search_time_ms; });
-        std::cout << "🎯 最高召回: " << best_recall.method << "(" << best_recall.params << ") R@10=" << std::fixed << std::setprecision(3) << best_recall.recall_10 << std::endl;
+    std::cout << "🎯 最高召回: " << best_recall.method << "(" << best_recall.params << ") R@" << k << "=" << std::fixed << std::setprecision(3) << best_recall.recall_10 << std::endl;
         std::cout << "⚡ 最快搜索: " << fastest.method << "(" << fastest.params << ") " << std::setprecision(2) << fastest.search_time_ms << " ms/query" << std::endl;
 
         // Detailed table
-        std::cout << "\n📊 详细结果:" << std::endl;
-        std::cout << std::setw(12) << "Method" << std::setw(30) << "Params" << std::setw(8) << "efS" << std::setw(10) << "Build(s)"
-                  << std::setw(12) << "Search(ms)" << std::setw(10) << "R@10" << std::setw(12) << "Mem(MB)" << std::setw(10) << "Compress" << std::endl;
-        std::cout << std::string(110, '-') << std::endl;
+    std::cout << "\n📊 详细结果:" << std::endl;
+    std::string rcol = std::string("R@") + std::to_string(k);
+    std::cout << std::setw(12) << "Method"
+                  << std::setw(30) << "Params"
+                  << std::setw(8) << "efS"
+                  << std::setw(10) << "Train(s)"
+                  << std::setw(10) << "Add(s)"
+                  << std::setw(10) << "Build(s)"
+                  << std::setw(12) << "Search(ms)"
+          << std::setw(10) << rcol
+                  << std::setw(12) << "Mem(MB)"
+                  << std::setw(10) << "Compress" << std::endl;
+        std::cout << std::string(130, '-') << std::endl;
         for (const auto& r : results) {
             std::cout << std::setw(12) << r.method
                       << std::setw(30) << r.params
                       << std::setw(8) << r.efS
-                      << std::setw(10) << std::fixed << std::setprecision(2) << r.build_time
+                      << std::setw(10) << std::fixed << std::setprecision(2) << r.train_time
+                      << std::setw(10) << std::setprecision(2) << r.add_time
+                      << std::setw(10) << std::setprecision(2) << r.build_time
                       << std::setw(12) << std::setprecision(2) << r.search_time_ms
                       << std::setw(10) << std::setprecision(3) << r.recall_10
                       << std::setw(12) << std::setprecision(1) << r.memory_mb
@@ -353,12 +396,12 @@ public:
     void saveResults(const std::vector<TestResult>& results, const std::string& path) {
         std::ofstream csv_file(path);
         if (csv_file.is_open()) {
-            csv_file << "method,params,hnsw_M,efC,efS,pq_m,pq_nbits,qtype,build_time,search_time_ms,recall_at_1,recall_at_5,recall_at_10,memory_mb,compression_ratio\n";
+            csv_file << "method,params,hnsw_M,efC,efS,pq_m,pq_nbits,qtype,train_time,add_time,build_time,search_time_ms,recall_at_1,recall_at_5,recall_at_10,memory_mb,compression_ratio\n";
             for (const auto& r : results) {
                 csv_file << r.method << "," << r.params << ","
                          << r.hnsw_M << "," << r.efC << "," << r.efS << ","
                          << r.pq_m << "," << r.pq_nbits << "," << qtypeName(r.qtype) << ","
-                         << r.build_time << "," << r.search_time_ms << ","
+                         << r.train_time << "," << r.add_time << "," << r.build_time << "," << r.search_time_ms << ","
                          << r.recall_1 << "," << r.recall_5 << "," << r.recall_10 << ","
                          << r.memory_mb << "," << r.compression_ratio << "\n";
             }
@@ -401,6 +444,12 @@ int main(int argc, char** argv) {
         else if (a == "--efS") next(opt.efS);
         else if (a == "--pq-m") next(opt.pq_m);
         else if (a == "--pq-nbits") next(opt.pq_nbits);
+        else if (a == "--pq-train-ratio") {
+            std::string s; nexts(s);
+            try { opt.pq_train_ratio = std::stod(s); } catch (...) {}
+            if (opt.pq_train_ratio < 0.0) opt.pq_train_ratio = 0.0;
+            if (opt.pq_train_ratio > 1.0) opt.pq_train_ratio = 1.0;
+        }
         else if (a == "--sq-qtype") { std::string s; nexts(s); opt.sq_qtype = parseQType(s); }
         else if (a == "--which") { std::string s; nexts(s); opt.which = splitCSV(s); }
         else if (a == "--out-csv") nexts(opt.out_csv);
@@ -415,6 +464,7 @@ int main(int argc, char** argv) {
                          "  --efS INT           HNSW efSearch (default 64)\n"
                          "  --pq-m INT          PQ m for HNSW-PQ (default 16)\n"
                          "  --pq-nbits INT      PQ nbits for HNSW-PQ (default 8)\n"
+                         "  --pq-train-ratio F  PQ train ratio in [0,1] (default 1.0)\n"
                          "  --sq-qtype STR      SQ qtype for HNSW-SQ (QT_8bit|QT_4bit|QT_8bit_uniform|QT_fp16)\n"
                          "  --which STR         comma list: all|hnsw_flat|hnsw_sq|hnsw_pq (default all)\n"
                          "  --out-csv PATH      output csv path (default hnsw_index_types_results.csv)\n";

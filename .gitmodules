@@ -4,3 +4,6 @@
 [submodule "contrib/openblas"]
 	path = contrib/openblas
 	url = https://github.com/zhiqiang-hhhh/OpenBLAS.git
+[submodule "hnsw-visual"]
+	path = contrib/hnsw-illustrated
+	url = https://github.com/stefanwebb/hnsw-illustrated.git
