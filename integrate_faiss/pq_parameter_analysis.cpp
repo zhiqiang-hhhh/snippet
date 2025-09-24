@@ -2,6 +2,7 @@
 #include <faiss/IndexHNSW.h>
 #include <faiss/IndexFlat.h>
 #include <faiss/MetricType.h>
+#include <faiss/IndexScalarQuantizer.h>
 #include <iostream>
 #include <vector>
 #include <random>
@@ -10,7 +11,34 @@
 #include <fstream>
 #include <algorithm>
 #include <cmath>
-#include <set>
+#include <string>
+#include <sstream>
+#include <unordered_set>
+
+struct Options {
+    int dim = 128;
+    int nb = 20000;
+    int nq = 500;
+    int k = 10;
+
+    // HNSW
+    int hnsw_M = 32;
+    int efC = 200;
+    int efS = 64;
+
+    // PQ (for HNSW-PQ)
+    int pq_m = 16;
+    int pq_nbits = 8;
+
+    // SQ (for HNSW-SQ)
+    int sq_qtype = (int)faiss::ScalarQuantizer::QuantizerType::QT_8bit;
+
+    // Which tests to run: all, hnsw_flat, hnsw_sq, hnsw_pq
+    std::vector<std::string> which = {"all"};
+
+    // Output
+    std::string out_csv = "hnsw_index_types_results.csv";
+};
 
 class PQBenchmark {
 private:
@@ -25,9 +53,8 @@ private:
 public:
     PQBenchmark(int dim = 128, int nb = 20000, int nq = 500, int k = 10) 
         : dim(dim), nb(nb), nq(nq), k(k) {
-        std::cout << "=== PQ量化参数M影响分析 C++ Demo ===" << std::endl;
+        std::cout << "=== HNSW Index Types Benchmark (C++) ===" << std::endl;
         std::cout << "配置: dim=" << dim << ", nb=" << nb << ", nq=" << nq << ", k=" << k << std::endl;
-        
         generateData();
         computeGroundTruth();
     }
@@ -84,123 +111,166 @@ public:
     }
     
     struct TestResult {
-        int M;
-        int sub_dim;
-        int clusters_per_subvector;
-        double build_time;
-        double search_time_ms;
-        double recall_1;
-        double recall_5;
-        double recall_10;
-        double memory_mb;
-        double compression_ratio;
+        std::string method;       // HNSW-Flat / HNSW-SQ / HNSW-PQ
+        std::string params;       // printable params
+        int hnsw_M = 0;
+        int efC = 0;
+        int efS = 0;
+        int pq_m = 0;
+        int pq_nbits = 0;
+        int qtype = -1;           // for SQ
+
+        double build_time = 0.0;  // train + add seconds
+        double search_time_ms = 0.0; // per query
+        double recall_1 = 0.0;
+        double recall_5 = 0.0;
+        double recall_10 = 0.0;
+        double memory_mb = 0.0;   // encoding only
+        double compression_ratio = 0.0;
     };
-    
-    TestResult testPQIndex(int m, int nbits) {
-        std::cout << "  测试 IndexPQ (M=" << m << ", nbits=" << nbits << ")..." << std::endl;
-        
-        TestResult result;
-        result.M = m;
-        result.sub_dim = dim / m;
-        result.clusters_per_subvector = 1 << nbits;  // 2^nbits
-        
-        try {
-            // 创建PQ索引
-            faiss::IndexPQ index(dim, m, nbits, faiss::METRIC_L2);
-            
-            // 训练和添加向量
-            auto start = std::chrono::high_resolution_clock::now();
-            index.train(nb, database.data());
-            index.add(nb, database.data());
-            auto end = std::chrono::high_resolution_clock::now();
-            
-            result.build_time = std::chrono::duration<double>(end - start).count();
-            
-            // 搜索测试
-            std::vector<float> distances(nq * k);
-            std::vector<faiss::idx_t> labels(nq * k);
-            
-            start = std::chrono::high_resolution_clock::now();
-            index.search(nq, queries.data(), k, distances.data(), labels.data());
-            end = std::chrono::high_resolution_clock::now();
-            
-            result.search_time_ms = std::chrono::duration<double, std::milli>(end - start).count() / nq;
-            
-            // 计算召回率
-            result.recall_1 = computeRecall(labels, ground_truth, 1);
-            result.recall_5 = computeRecall(labels, ground_truth, 5);
-            result.recall_10 = computeRecall(labels, ground_truth, k);
-            
-            // 内存使用估算
-            result.memory_mb = static_cast<double>(nb * m * nbits) / 8.0 / (1024 * 1024);
-            result.compression_ratio = static_cast<double>(nb * dim * 4) / (nb * m * nbits / 8.0);
-            
-        } catch (const std::exception& e) {
-            std::cerr << "    错误: " << e.what() << std::endl;
-            // 设置默认值表示失败
-            result.build_time = -1;
-            result.search_time_ms = -1;
-            result.recall_1 = result.recall_5 = result.recall_10 = 0;
-            result.memory_mb = 0;
-            result.compression_ratio = 0;
+
+    // 小工具：qtype 名称
+    static const char* qtypeName(int qtype) {
+        using QT = faiss::ScalarQuantizer::QuantizerType;
+        switch (qtype) {
+            case QT::QT_8bit:          return "QT_8bit";
+            case QT::QT_4bit:          return "QT_4bit";
+            case QT::QT_8bit_uniform:  return "QT_8bit_uniform";
+            case QT::QT_fp16:          return "QT_fp16";
+#ifdef FAISS_HAVE_QT_8BIT_DIRECT
+            case QT::QT_8bit_direct:   return "QT_8bit_direct";
+#endif
+            default:                   return "unknown";
         }
-        
-        return result;
     }
-    
-    TestResult testHNSWPQIndex(int m, int nbits, int hnsw_m = 16) {
-        std::cout << "  测试 IndexHNSWPQ (M=" << m << ", nbits=" << nbits << ")..." << std::endl;
-        
-        TestResult result;
-        result.M = m;
-        result.sub_dim = dim / m;
-        result.clusters_per_subvector = 1 << nbits;
-        
+
+    // HNSW-Flat
+    TestResult testHNSWFlat(int hnsw_m, int efC, int efS) {
+        std::cout << "  测试 IndexHNSWFlat (M=" << hnsw_m << ", efC=" << efC << ", efS=" << efS << ")..." << std::endl;
+        TestResult r{};
+        r.method = "HNSW-Flat";
+        r.params = "HNSW_M=" + std::to_string(hnsw_m) + ", efC=" + std::to_string(efC) + ", efS=" + std::to_string(efS);
+        r.hnsw_M = hnsw_m; r.efC = efC; r.efS = efS;
         try {
-            // 创建HNSW+PQ索引
-            faiss::IndexHNSWPQ index(dim, m, nbits, hnsw_m, faiss::METRIC_L2);
-            index.hnsw.efConstruction = 100;  // 降低构建参数
-            
-            // 训练和添加向量
-            auto start = std::chrono::high_resolution_clock::now();
-            index.train(nb, database.data());
+            faiss::IndexHNSWFlat index(dim, hnsw_m);
+            index.hnsw.efConstruction = efC;
+            auto t0 = std::chrono::high_resolution_clock::now();
             index.add(nb, database.data());
-            auto end = std::chrono::high_resolution_clock::now();
-            
-            result.build_time = std::chrono::duration<double>(end - start).count();
-            
-            // 搜索测试
-            index.hnsw.efSearch = 32;
+            auto t1 = std::chrono::high_resolution_clock::now();
+            r.build_time = std::chrono::duration<double>(t1 - t0).count();
+
+            index.hnsw.efSearch = efS;
             std::vector<float> distances(nq * k);
             std::vector<faiss::idx_t> labels(nq * k);
-            
-            start = std::chrono::high_resolution_clock::now();
+            t0 = std::chrono::high_resolution_clock::now();
             index.search(nq, queries.data(), k, distances.data(), labels.data());
-            end = std::chrono::high_resolution_clock::now();
-            
-            result.search_time_ms = std::chrono::duration<double, std::milli>(end - start).count() / nq;
-            
-            // 计算召回率
-            result.recall_1 = computeRecall(labels, ground_truth, 1);
-            result.recall_5 = computeRecall(labels, ground_truth, 5);
-            result.recall_10 = computeRecall(labels, ground_truth, k);
-            
-            // 内存使用估算 (PQ码 + HNSW图)
-            double pq_memory = static_cast<double>(nb * m * nbits) / 8.0;
-            double hnsw_memory = static_cast<double>(nb * hnsw_m * 8);  // 近似
-            result.memory_mb = (pq_memory + hnsw_memory) / (1024 * 1024);
-            result.compression_ratio = static_cast<double>(nb * dim * 4) / (pq_memory + hnsw_memory);
-            
+            t1 = std::chrono::high_resolution_clock::now();
+            r.search_time_ms = std::chrono::duration<double, std::milli>(t1 - t0).count() / nq;
+
+            r.recall_1 = computeRecall(labels, ground_truth, 1);
+            r.recall_5 = computeRecall(labels, ground_truth, 5);
+            r.recall_10 = computeRecall(labels, ground_truth, k);
+
+            double code_bytes = (double)dim * 4.0; // float32 per dim
+            r.memory_mb = (code_bytes * nb) / (1024.0 * 1024.0);
+            r.compression_ratio = ((double)dim * 4.0) / code_bytes; // =1
         } catch (const std::exception& e) {
             std::cerr << "    错误: " << e.what() << std::endl;
-            result.build_time = -1;
-            result.search_time_ms = -1;
-            result.recall_1 = result.recall_5 = result.recall_10 = 0;
-            result.memory_mb = 0;
-            result.compression_ratio = 0;
+            r.build_time = -1;
         }
-        
-        return result;
+        return r;
+    }
+
+    // HNSW-SQ
+    TestResult testHNSWSQ(int qtype, int hnsw_m, int efC, int efS) {
+        std::cout << "  测试 IndexHNSWSQ (" << qtypeName(qtype) << ", M=" << hnsw_m << ", efC=" << efC << ", efS=" << efS << ")..." << std::endl;
+        TestResult r{};
+        r.method = "HNSW-SQ";
+        r.params = "HNSW_M=" + std::to_string(hnsw_m) + ", " + qtypeName(qtype) + ", efS=" + std::to_string(efS);
+        r.hnsw_M = hnsw_m; r.efC = efC; r.efS = efS; r.qtype = qtype;
+        try {
+            faiss::IndexHNSWSQ index(dim, (faiss::ScalarQuantizer::QuantizerType)qtype, hnsw_m, faiss::METRIC_L2);
+            index.hnsw.efConstruction = efC;
+            auto t0 = std::chrono::high_resolution_clock::now();
+            index.train(nb, database.data());
+            index.add(nb, database.data());
+            auto t1 = std::chrono::high_resolution_clock::now();
+            r.build_time = std::chrono::duration<double>(t1 - t0).count();
+
+            index.hnsw.efSearch = efS;
+            std::vector<float> distances(nq * k);
+            std::vector<faiss::idx_t> labels(nq * k);
+            t0 = std::chrono::high_resolution_clock::now();
+            index.search(nq, queries.data(), k, distances.data(), labels.data());
+            t1 = std::chrono::high_resolution_clock::now();
+            r.search_time_ms = std::chrono::duration<double, std::milli>(t1 - t0).count() / nq;
+
+            r.recall_1 = computeRecall(labels, ground_truth, 1);
+            r.recall_5 = computeRecall(labels, ground_truth, 5);
+            r.recall_10 = computeRecall(labels, ground_truth, k);
+
+            int bits = 8;
+            using QT = faiss::ScalarQuantizer::QuantizerType;
+            switch ((QT)qtype) {
+                case QT::QT_8bit:
+                case QT::QT_8bit_uniform:
+                    bits = 8; break;
+                case QT::QT_4bit:
+                    bits = 4; break;
+                case QT::QT_fp16:
+                    bits = 16; break;
+                default: bits = 8; break;
+            }
+            double code_bytes = (double)dim * bits / 8.0;
+            r.memory_mb = (code_bytes * nb) / (1024.0 * 1024.0);
+            r.compression_ratio = ((double)dim * 4.0) / code_bytes;
+        } catch (const std::exception& e) {
+            std::cerr << "    错误: " << e.what() << std::endl;
+            r.build_time = -1;
+        }
+        return r;
+    }
+
+    // HNSW-PQ
+    TestResult testHNSWPQ(int pq_m, int pq_nbits, int hnsw_m, int efC, int efS) {
+        std::cout << "  测试 IndexHNSWPQ (M=" << hnsw_m << ", PQ(m=" << pq_m << ", nbits=" << pq_nbits << "), efC=" << efC << ", efS=" << efS << ")..." << std::endl;
+        TestResult r{};
+        r.method = "HNSW-PQ";
+        r.params = "HNSW_M=" + std::to_string(hnsw_m) + ", PQ(m=" + std::to_string(pq_m) + ",nbits=" + std::to_string(pq_nbits) + ")";
+        r.hnsw_M = hnsw_m; r.efC = efC; r.efS = efS; r.pq_m = pq_m; r.pq_nbits = pq_nbits;
+        try {
+            if (dim % pq_m != 0) {
+                std::cout << "    跳过：dim=" << dim << " 不能被 m=" << pq_m << " 整除" << std::endl;
+                r.build_time = -1; return r;
+            }
+            faiss::IndexHNSWPQ index(dim, pq_m, hnsw_m, pq_nbits);
+            index.hnsw.efConstruction = efC;
+            auto t0 = std::chrono::high_resolution_clock::now();
+            index.train(nb, database.data());
+            index.add(nb, database.data());
+            auto t1 = std::chrono::high_resolution_clock::now();
+            r.build_time = std::chrono::duration<double>(t1 - t0).count();
+
+            index.hnsw.efSearch = efS;
+            std::vector<float> distances(nq * k);
+            std::vector<faiss::idx_t> labels(nq * k);
+            t0 = std::chrono::high_resolution_clock::now();
+            index.search(nq, queries.data(), k, distances.data(), labels.data());
+            t1 = std::chrono::high_resolution_clock::now();
+            r.search_time_ms = std::chrono::duration<double, std::milli>(t1 - t0).count() / nq;
+
+            r.recall_1 = computeRecall(labels, ground_truth, 1);
+            r.recall_5 = computeRecall(labels, ground_truth, 5);
+            r.recall_10 = computeRecall(labels, ground_truth, k);
+
+            double code_bytes = (double)pq_m * pq_nbits / 8.0;
+            r.memory_mb = (code_bytes * nb) / (1024.0 * 1024.0);
+            r.compression_ratio = ((double)dim * 4.0) / code_bytes;
+        } catch (const std::exception& e) {
+            std::cerr << "    错误: " << e.what() << std::endl;
+            r.build_time = -1;
+        }
+        return r;
     }
     
     double computeRecall(const std::vector<faiss::idx_t>& pred_labels, 
@@ -209,216 +279,157 @@ public:
         double recall_sum = 0.0;
         
         for (int i = 0; i < nq; i++) {
-            std::set<faiss::idx_t> true_set, pred_set;
-            
+            std::unordered_set<faiss::idx_t> true_set;
+            true_set.reserve(top_k * 2);
             for (int j = 0; j < top_k; j++) {
                 true_set.insert(true_labels[i * k + j]);
-                pred_set.insert(pred_labels[i * k + j]);
             }
-            
-            // 计算交集
-            std::vector<faiss::idx_t> intersection;
-            std::set_intersection(true_set.begin(), true_set.end(),
-                                pred_set.begin(), pred_set.end(),
-                                std::back_inserter(intersection));
-            
-            if (true_set.size() > 0) {
-                recall_sum += static_cast<double>(intersection.size()) / true_set.size();
+            int hit = 0;
+            for (int j = 0; j < top_k; j++) {
+                if (true_set.find(pred_labels[i * k + j]) != true_set.end()) ++hit;
+            }
+            if (top_k > 0) {
+                recall_sum += static_cast<double>(hit) / top_k;
             }
         }
         
         return recall_sum / nq;
     }
     
-    void runBenchmark() {
-        std::cout << "\n开始PQ参数M影响分析..." << std::endl;
-        std::cout << std::string(80, '=') << std::endl;
-        
-        // 选择合适的参数范围
-        std::vector<int> m_values = {8, 16, 32, 64};  // M值需要能整除dim
-        int nbits = 4;  // 使用4位，每个子量化器16个聚类中心
-        
-        std::cout << "测试参数:" << std::endl;
-        std::cout << "  M值范围: ";
-        for (int m : m_values) {
-            std::cout << m << " ";
+    std::vector<TestResult> runIndexTypeBenchmarks(const Options& opt) {
+        std::vector<TestResult> results;
+        auto contains = [&](const std::string& what) {
+            if (opt.which.size() == 1 && opt.which[0] == "all") return true;
+            return std::find(opt.which.begin(), opt.which.end(), what) != opt.which.end();
+        };
+
+        if (contains("hnsw_flat")) {
+            auto r = testHNSWFlat(opt.hnsw_M, opt.efC, opt.efS);
+            if (r.build_time >= 0) results.push_back(r);
         }
-        std::cout << std::endl;
-        std::cout << "  nbits: " << nbits << " (每个子量化器 " << (1 << nbits) << " 个聚类中心)" << std::endl;
-        std::cout << std::string(80, '-') << std::endl;
-        
-        std::vector<TestResult> pq_results, hnswpq_results;
-        
-        for (int m : m_values) {
-            if (dim % m != 0) {
-                std::cout << "跳过 M=" << m << ": 维度" << dim << "不能被M整除" << std::endl;
-                continue;
-            }
-            
-            std::cout << "\n🔬 测试 M=" << m << " (子向量维度: " << dim/m << ")" << std::endl;
-            
-            // 检查聚类中心数量是否合理
-            int total_clusters = (1 << nbits);  // 每个子量化器的聚类中心数
-            if (nb < total_clusters * 10) {  // 至少需要10倍的训练数据
-                std::cout << "  ⚠️  警告: 训练数据可能不足 (需要 " << total_clusters << " 个聚类中心)" << std::endl;
-            }
-            
-            // 测试PQ索引
-            TestResult pq_result = testPQIndex(m, nbits);
-            if (pq_result.build_time >= 0) {  // 成功
-                pq_results.push_back(pq_result);
-                std::cout << "    PQ: 构建=" << std::fixed << std::setprecision(2) << pq_result.build_time 
-                         << "s, 搜索=" << pq_result.search_time_ms << "ms, 召回率@10=" 
-                         << std::setprecision(3) << pq_result.recall_10 << std::endl;
-            }
-            
-            // 测试HNSW+PQ索引
-            TestResult hnswpq_result = testHNSWPQIndex(m, nbits);
-            if (hnswpq_result.build_time >= 0) {  // 成功
-                hnswpq_results.push_back(hnswpq_result);
-                std::cout << "    HNSW+PQ: 构建=" << std::fixed << std::setprecision(2) << hnswpq_result.build_time 
-                         << "s, 搜索=" << hnswpq_result.search_time_ms << "ms, 召回率@10=" 
-                         << std::setprecision(3) << hnswpq_result.recall_10 << std::endl;
-            }
+        if (contains("hnsw_sq")) {
+            auto r = testHNSWSQ(opt.sq_qtype, opt.hnsw_M, opt.efC, opt.efS);
+            if (r.build_time >= 0) results.push_back(r);
         }
-        
-        // 输出结果分析
-        printAnalysis(pq_results, hnswpq_results);
-        
-        // 保存结果到CSV
-        saveResults(pq_results, hnswpq_results);
+        if (contains("hnsw_pq")) {
+            auto r = testHNSWPQ(opt.pq_m, opt.pq_nbits, opt.hnsw_M, opt.efC, opt.efS);
+            if (r.build_time >= 0) results.push_back(r);
+        }
+        return results;
     }
-    
-    void printAnalysis(const std::vector<TestResult>& pq_results, 
-                      const std::vector<TestResult>& hnswpq_results) {
+
+    void printAnalysis(const std::vector<TestResult>& results) {
         std::cout << "\n" << std::string(80, '=') << std::endl;
-        std::cout << "📈 PQ量化参数M影响分析总结" << std::endl;
+        std::cout << "📈 HNSW Index Types 指标总结" << std::endl;
         std::cout << std::string(80, '=') << std::endl;
-        
-        if (pq_results.empty() && hnswpq_results.empty()) {
+        if (results.empty()) {
             std::cout << "❌ 没有成功的测试结果" << std::endl;
             return;
         }
-        
-        std::cout << "\n📊 主要发现:" << std::endl;
-        
-        // PQ结果分析
-        if (!pq_results.empty()) {
-            auto best_pq_recall = *std::max_element(pq_results.begin(), pq_results.end(),
-                [](const TestResult& a, const TestResult& b) { return a.recall_10 < b.recall_10; });
-            auto fastest_pq = *std::min_element(pq_results.begin(), pq_results.end(),
-                [](const TestResult& a, const TestResult& b) { return a.search_time_ms < b.search_time_ms; });
-            
-            std::cout << "🎯 PQ最佳召回率: M=" << best_pq_recall.M 
-                     << ", 召回率=" << std::fixed << std::setprecision(3) << best_pq_recall.recall_10 << std::endl;
-            std::cout << "⚡ PQ最快搜索: M=" << fastest_pq.M 
-                     << ", 时间=" << std::setprecision(2) << fastest_pq.search_time_ms << "ms" << std::endl;
-        }
-        
-        // HNSW+PQ结果分析
-        if (!hnswpq_results.empty()) {
-            auto best_hnsw_recall = *std::max_element(hnswpq_results.begin(), hnswpq_results.end(),
-                [](const TestResult& a, const TestResult& b) { return a.recall_10 < b.recall_10; });
-            auto fastest_hnsw = *std::min_element(hnswpq_results.begin(), hnswpq_results.end(),
-                [](const TestResult& a, const TestResult& b) { return a.search_time_ms < b.search_time_ms; });
-            
-            std::cout << "🎯 HNSW+PQ最佳召回率: M=" << best_hnsw_recall.M 
-                     << ", 召回率=" << std::setprecision(3) << best_hnsw_recall.recall_10 << std::endl;
-            std::cout << "⚡ HNSW+PQ最快搜索: M=" << fastest_hnsw.M 
-                     << ", 时间=" << std::setprecision(2) << fastest_hnsw.search_time_ms << "ms" << std::endl;
-        }
-        
-        std::cout << "\n📋 关键趋势:" << std::endl;
-        std::cout << "• M增加 → 子向量维度减少 → 量化精度可能降低" << std::endl;
-        std::cout << "• M增加 → 子量化器数量增加 → 训练时间增加" << std::endl;
-        std::cout << "• M适中时通常有最佳的精度/速度平衡" << std::endl;
-        
-        // 详细结果表格
-        std::cout << "\n📊 详细结果 (PQ):" << std::endl;
-        std::cout << std::setw(5) << "M" << std::setw(10) << "子维度" << std::setw(12) << "构建时间(s)" 
-                 << std::setw(12) << "搜索时间(ms)" << std::setw(12) << "召回率@10" << std::setw(12) << "内存(MB)" << std::endl;
-        std::cout << std::string(65, '-') << std::endl;
-        
-        for (const auto& result : pq_results) {
-            std::cout << std::setw(5) << result.M 
-                     << std::setw(10) << result.sub_dim
-                     << std::setw(12) << std::fixed << std::setprecision(2) << result.build_time
-                     << std::setw(12) << std::setprecision(2) << result.search_time_ms
-                     << std::setw(12) << std::setprecision(3) << result.recall_10
-                     << std::setw(12) << std::setprecision(1) << result.memory_mb << std::endl;
-        }
-        
-        if (!hnswpq_results.empty()) {
-            std::cout << "\n📊 详细结果 (HNSW+PQ):" << std::endl;
-            std::cout << std::setw(5) << "M" << std::setw(10) << "子维度" << std::setw(12) << "构建时间(s)" 
-                     << std::setw(12) << "搜索时间(ms)" << std::setw(12) << "召回率@10" << std::setw(12) << "内存(MB)" << std::endl;
-            std::cout << std::string(65, '-') << std::endl;
-            
-            for (const auto& result : hnswpq_results) {
-                std::cout << std::setw(5) << result.M 
-                         << std::setw(10) << result.sub_dim
-                         << std::setw(12) << std::fixed << std::setprecision(2) << result.build_time
-                         << std::setw(12) << std::setprecision(2) << result.search_time_ms
-                         << std::setw(12) << std::setprecision(3) << result.recall_10
-                         << std::setw(12) << std::setprecision(1) << result.memory_mb << std::endl;
-            }
+        // Best by recall and fastest
+        auto best_recall = *std::max_element(results.begin(), results.end(), [](const TestResult& a, const TestResult& b){ return a.recall_10 < b.recall_10; });
+        auto fastest = *std::min_element(results.begin(), results.end(), [](const TestResult& a, const TestResult& b){ return a.search_time_ms < b.search_time_ms; });
+        std::cout << "🎯 最高召回: " << best_recall.method << "(" << best_recall.params << ") R@10=" << std::fixed << std::setprecision(3) << best_recall.recall_10 << std::endl;
+        std::cout << "⚡ 最快搜索: " << fastest.method << "(" << fastest.params << ") " << std::setprecision(2) << fastest.search_time_ms << " ms/query" << std::endl;
+
+        // Detailed table
+        std::cout << "\n📊 详细结果:" << std::endl;
+        std::cout << std::setw(12) << "Method" << std::setw(30) << "Params" << std::setw(8) << "efS" << std::setw(10) << "Build(s)"
+                  << std::setw(12) << "Search(ms)" << std::setw(10) << "R@10" << std::setw(12) << "Mem(MB)" << std::setw(10) << "Compress" << std::endl;
+        std::cout << std::string(110, '-') << std::endl;
+        for (const auto& r : results) {
+            std::cout << std::setw(12) << r.method
+                      << std::setw(30) << r.params
+                      << std::setw(8) << r.efS
+                      << std::setw(10) << std::fixed << std::setprecision(2) << r.build_time
+                      << std::setw(12) << std::setprecision(2) << r.search_time_ms
+                      << std::setw(10) << std::setprecision(3) << r.recall_10
+                      << std::setw(12) << std::setprecision(1) << r.memory_mb
+                      << std::setw(10) << std::setprecision(1) << r.compression_ratio
+                      << std::endl;
         }
     }
-    
-    void saveResults(const std::vector<TestResult>& pq_results, 
-                    const std::vector<TestResult>& hnswpq_results) {
-        std::ofstream csv_file("pq_benchmark_results.csv");
-        
+
+    void saveResults(const std::vector<TestResult>& results, const std::string& path) {
+        std::ofstream csv_file(path);
         if (csv_file.is_open()) {
-            // CSV头部
-            csv_file << "Index_Type,M,Sub_Dim,Clusters_Per_Subvector,Build_Time,Search_Time_MS,"
-                    << "Recall_1,Recall_5,Recall_10,Memory_MB,Compression_Ratio\n";
-            
-            // PQ结果
-            for (const auto& result : pq_results) {
-                csv_file << "PQ," << result.M << "," << result.sub_dim << "," 
-                        << result.clusters_per_subvector << "," << result.build_time << ","
-                        << result.search_time_ms << "," << result.recall_1 << ","
-                        << result.recall_5 << "," << result.recall_10 << ","
-                        << result.memory_mb << "," << result.compression_ratio << "\n";
+            csv_file << "method,params,hnsw_M,efC,efS,pq_m,pq_nbits,qtype,build_time,search_time_ms,recall_at_1,recall_at_5,recall_at_10,memory_mb,compression_ratio\n";
+            for (const auto& r : results) {
+                csv_file << r.method << "," << r.params << ","
+                         << r.hnsw_M << "," << r.efC << "," << r.efS << ","
+                         << r.pq_m << "," << r.pq_nbits << "," << qtypeName(r.qtype) << ","
+                         << r.build_time << "," << r.search_time_ms << ","
+                         << r.recall_1 << "," << r.recall_5 << "," << r.recall_10 << ","
+                         << r.memory_mb << "," << r.compression_ratio << "\n";
             }
-            
-            // HNSW+PQ结果
-            for (const auto& result : hnswpq_results) {
-                csv_file << "HNSW+PQ," << result.M << "," << result.sub_dim << "," 
-                        << result.clusters_per_subvector << "," << result.build_time << ","
-                        << result.search_time_ms << "," << result.recall_1 << ","
-                        << result.recall_5 << "," << result.recall_10 << ","
-                        << result.memory_mb << "," << result.compression_ratio << "\n";
-            }
-            
             csv_file.close();
-            std::cout << "\n💾 结果已保存到: pq_benchmark_results.csv" << std::endl;
+            std::cout << "\n💾 结果已保存到: " << path << std::endl;
         } else {
             std::cerr << "❌ 无法创建CSV文件" << std::endl;
         }
     }
 };
 
-int main() {
-    try {
-        // 创建基准测试实例
-        PQBenchmark benchmark(
-            128,    // dim - 向量维度
-            20000,  // nb - 数据库向量数量
-            500,    // nq - 查询向量数量
-            10      // k - 搜索邻居数
-        );
-        
-        // 运行基准测试
-        benchmark.runBenchmark();
-        
-        std::cout << "\n✅ 分析完成！" << std::endl;
-        
-    } catch (const std::exception& e) {
-        std::cerr << "❌ 错误: " << e.what() << std::endl;
-        return 1;
+static int parseQType(const std::string& s) {
+    using QT = faiss::ScalarQuantizer::QuantizerType;
+    if (s == "QT_8bit") return (int)QT::QT_8bit;
+    if (s == "QT_4bit") return (int)QT::QT_4bit;
+    if (s == "QT_8bit_uniform") return (int)QT::QT_8bit_uniform;
+    if (s == "QT_fp16") return (int)QT::QT_fp16;
+    // fallback: try int
+    try { return std::stoi(s); } catch (...) { return (int)QT::QT_8bit; }
+}
+
+static std::vector<std::string> splitCSV(const std::string& s) {
+    std::vector<std::string> out; std::stringstream ss(s); std::string item;
+    while (std::getline(ss, item, ',')) { if (!item.empty()) out.push_back(item); }
+    return out;
+}
+
+int main(int argc, char** argv) {
+    Options opt;
+    // Naive CLI parsing
+    for (int i = 1; i < argc; ++i) {
+        std::string a = argv[i]; auto next = [&](int& dst){ if (i + 1 < argc) dst = std::stoi(argv[++i]); };
+        auto nexts = [&](std::string& dst){ if (i + 1 < argc) dst = argv[++i]; };
+        if (a == "--dim") next(opt.dim);
+        else if (a == "--nb") next(opt.nb);
+        else if (a == "--nq") next(opt.nq);
+        else if (a == "--k") next(opt.k);
+        else if (a == "--hnsw-M") next(opt.hnsw_M);
+        else if (a == "--efC") next(opt.efC);
+        else if (a == "--efS") next(opt.efS);
+        else if (a == "--pq-m") next(opt.pq_m);
+        else if (a == "--pq-nbits") next(opt.pq_nbits);
+        else if (a == "--sq-qtype") { std::string s; nexts(s); opt.sq_qtype = parseQType(s); }
+        else if (a == "--which") { std::string s; nexts(s); opt.which = splitCSV(s); }
+        else if (a == "--out-csv") nexts(opt.out_csv);
+        else if (a == "-h" || a == "--help") {
+            std::cout << "Usage: ./bench [options]\n"
+                         "  --dim INT           vector dim (default 128)\n"
+                         "  --nb INT            database size (default 20000)\n"
+                         "  --nq INT            queries count (default 500)\n"
+                         "  --k INT             top-k (default 10)\n"
+                         "  --hnsw-M INT        HNSW M (default 32)\n"
+                         "  --efC INT           HNSW efConstruction (default 200)\n"
+                         "  --efS INT           HNSW efSearch (default 64)\n"
+                         "  --pq-m INT          PQ m for HNSW-PQ (default 16)\n"
+                         "  --pq-nbits INT      PQ nbits for HNSW-PQ (default 8)\n"
+                         "  --sq-qtype STR      SQ qtype for HNSW-SQ (QT_8bit|QT_4bit|QT_8bit_uniform|QT_fp16)\n"
+                         "  --which STR         comma list: all|hnsw_flat|hnsw_sq|hnsw_pq (default all)\n"
+                         "  --out-csv PATH      output csv path (default hnsw_index_types_results.csv)\n";
+            return 0;
+        }
     }
-    
+
+    try {
+        PQBenchmark bench(opt.dim, opt.nb, opt.nq, opt.k);
+        auto results = bench.runIndexTypeBenchmarks(opt);
+        bench.printAnalysis(results);
+        bench.saveResults(results, opt.out_csv);
+        std::cout << "\n✅ 分析完成！" << std::endl;
+    } catch (const std::exception& e) {
+        std::cerr << "❌ 错误: " << e.what() << std::endl; return 1;
+    }
     return 0;
 }
