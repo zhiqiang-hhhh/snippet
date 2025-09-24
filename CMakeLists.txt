@@ -12,7 +12,6 @@ if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Release)
 endif()
 
-add_definitions(-Werror)
 add_subdirectory(integrate_faiss)
 add_subdirectory(csapp)
 add_subdirectory(openmp)

@@ -1,10 +1,6 @@
-
-[submodule "contrib/hyperscan"]
-	path = contrib/hyperscan
-	url = https://github.com/intel/hyperscan.git
-[submodule "faiss"]
+[submodule "contrib/faiss"]
 	path = contrib/faiss
-	url = git@github.com:zhiqiang-hhhh/faiss.git
-[submodule "openblas"]
+	url = https://github.com/zhiqiang-hhhh/faiss.git
+[submodule "contrib/openblas"]
 	path = contrib/openblas
-	url = git@github.com:zhiqiang-hhhh/OpenBLAS.git
+	url = https://github.com/zhiqiang-hhhh/OpenBLAS.git
