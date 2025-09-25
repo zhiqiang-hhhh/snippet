@@ -1,19 +1,48 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdlib>
 #include <faiss/IndexFlat.h>
 #include <faiss/IndexHNSW.h>
 #include <faiss/IndexPQ.h>
 #include <faiss/IndexScalarQuantizer.h>
 #include <faiss/MetricType.h>
+#include <faiss/index_io.h>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
 #include <random>
 #include <sstream>
 #include <string>
+#include <sys/stat.h>
+#include <unistd.h>
 #include <unordered_set>
 #include <vector>
+
+// 通过序列化来估算索引内存占用：写到临时文件，取文件大小（MB）
+static double measureIndexSerializedSize(faiss::Index *index) {
+  if (!index)
+    return 0.0;
+  char tmpl[] = "/tmp/faiss_index_memXXXXXX";
+  int fd = mkstemp(tmpl);
+  if (fd == -1) {
+    return 0.0;
+  }
+  close(fd); // 只保留文件名
+  try {
+    faiss::write_index(index, tmpl);
+    struct stat st;
+    double mb = 0.0;
+    if (::stat(tmpl, &st) == 0) {
+      mb = (double)st.st_size / (1024.0 * 1024.0);
+    }
+    ::unlink(tmpl);
+    return mb;
+  } catch (...) {
+    ::unlink(tmpl);
+    return 0.0;
+  }
+}
 
 struct Options {
   int dim = 128;
@@ -147,7 +176,7 @@ public:
     double recall_1 = 0.0;
     double recall_5 = 0.0;
     double recall_10 = 0.0;
-    double memory_mb = 0.0; // encoding only
+    double mbs_on_disk = 0.0; // serialized index size in MB
     double compression_ratio = 0.0;
   };
 
@@ -209,9 +238,17 @@ public:
       r.recall_5 = computeRecall(labels, ground_truth, 5);
       r.recall_10 = computeRecall(labels, ground_truth, k);
 
-      double code_bytes = (double)dim * 4.0; // float32 per dim
-      r.memory_mb = (code_bytes * nb) / (1024.0 * 1024.0);
-      r.compression_ratio = ((double)dim * 4.0) / code_bytes; // =1
+      // Serialize index to a temporary file to measure real memory footprint
+      // (including graph + codes)
+      r.mbs_on_disk = measureIndexSerializedSize(&index);
+      // For flat, compression ratio = original (dim*4) /
+      // (serialized_size_per_vector)
+      if (nb > 0) {
+        double per_vec = (r.mbs_on_disk * 1024.0 * 1024.0) / nb;
+        r.compression_ratio = ((double)dim * 4.0) / per_vec;
+      } else {
+        r.compression_ratio = 1.0;
+      }
     } catch (const std::exception &e) {
       std::cerr << "    错误: " << e.what() << std::endl;
       r.build_time = -1;
@@ -278,9 +315,13 @@ public:
         bits = 8;
         break;
       }
-      double code_bytes = (double)dim * bits / 8.0;
-      r.memory_mb = (code_bytes * nb) / (1024.0 * 1024.0);
-      r.compression_ratio = ((double)dim * 4.0) / code_bytes;
+      r.mbs_on_disk = measureIndexSerializedSize(&index);
+      if (nb > 0) {
+        double per_vec = (r.mbs_on_disk * 1024.0 * 1024.0) / nb;
+        r.compression_ratio = ((double)dim * 4.0) / per_vec;
+      } else {
+        r.compression_ratio = 0.0;
+      }
     } catch (const std::exception &e) {
       std::cerr << "    错误: " << e.what() << std::endl;
       r.build_time = -1;
@@ -351,9 +392,13 @@ public:
       r.recall_5 = computeRecall(labels, ground_truth, 5);
       r.recall_10 = computeRecall(labels, ground_truth, k);
 
-      double code_bytes = (double)pq_m * pq_nbits / 8.0;
-      r.memory_mb = (code_bytes * nb) / (1024.0 * 1024.0);
-      r.compression_ratio = ((double)dim * 4.0) / code_bytes;
+      r.mbs_on_disk = measureIndexSerializedSize(&index);
+      if (nb > 0) {
+        double per_vec = (r.mbs_on_disk * 1024.0 * 1024.0) / nb;
+        r.compression_ratio = ((double)dim * 4.0) / per_vec;
+      } else {
+        r.compression_ratio = 0.0;
+      }
     } catch (const std::exception &e) {
       std::cerr << "    错误: " << e.what() << std::endl;
       r.build_time = -1;
@@ -523,7 +568,7 @@ public:
               << std::setw(8) << "efS" << std::setw(10) << "Train(s)"
               << std::setw(10) << "Add(s)" << std::setw(10) << "Build(s)"
               << std::setw(12) << "Search(ms)" << std::setw(10) << rcol
-              << std::setw(12) << "Mem(MB)" << std::setw(10) << "Compress"
+              << std::setw(12) << "mbs_on_disk" << std::setw(10) << "Compress"
               << std::endl;
     std::cout << std::string(130, '-') << std::endl;
     for (const auto &r : results) {
@@ -542,7 +587,7 @@ public:
                 << std::setprecision(2) << r.build_time << std::setw(12)
                 << std::setprecision(2) << r.search_time_ms << std::setw(10)
                 << std::setprecision(3) << r.recall_10 << std::setw(12)
-                << std::setprecision(1) << r.memory_mb << std::setw(10)
+                << std::setprecision(1) << r.mbs_on_disk << std::setw(10)
                 << std::setprecision(1) << r.compression_ratio << std::endl;
     }
   }
@@ -554,7 +599,7 @@ public:
       csv_file
           << "method,dim,nb,nq,k,hnsw_M,efC,efS,pq_m,pq_nbits,pq_train_ratio,"
              "qtype,train_time,add_time,build_time,search_time_ms,recall_at_1,"
-             "recall_at_5,recall_at_10,memory_mb,compression_ratio\n";
+             "recall_at_5,recall_at_10,mbs_on_disk,compression_ratio\n";
       for (const auto &r : results) {
         csv_file << r.method << "," << r.dim << "," << r.nb << "," << r.nq
                  << "," << r.k << "," << r.hnsw_M << "," << r.efC << ","
@@ -562,7 +607,7 @@ public:
                  << r.pq_train_ratio << "," << qtypeName(r.qtype) << ","
                  << r.train_time << "," << r.add_time << "," << r.build_time
                  << "," << r.search_time_ms << "," << r.recall_1 << ","
-                 << r.recall_5 << "," << r.recall_10 << "," << r.memory_mb
+                 << r.recall_5 << "," << r.recall_10 << "," << r.mbs_on_disk
                  << "," << r.compression_ratio << "\n";
       }
       csv_file.close();
