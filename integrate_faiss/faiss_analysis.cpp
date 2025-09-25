@@ -21,18 +21,31 @@ struct Options {
     int nq = 500;
     int k = 10;
 
+    // Support list variants (if non-empty, they override the single value)
+    std::vector<int> dim_list;
+    std::vector<int> nb_list;
+    std::vector<int> nq_list;
+    std::vector<int> k_list;
+
     // HNSW
     int hnsw_M = 32;
     int efC = 200;
     int efS = 64;
+    std::vector<int> hnsw_M_list;
+    std::vector<int> efC_list;
+    std::vector<int> efS_list;
 
     // PQ (for HNSW-PQ)
     int pq_m = 16;
     int pq_nbits = 8;
     double pq_train_ratio = 1.0; // fraction of nb used for PQ training [0,1]
+    std::vector<int> pq_m_list;
+    std::vector<int> pq_nbits_list;
+    std::vector<double> pq_train_ratio_list; // allow multiple training ratios
 
     // SQ (for HNSW-SQ)
     int sq_qtype = (int)faiss::ScalarQuantizer::QuantizerType::QT_8bit;
+    std::vector<int> sq_qtype_list;
 
     // Which tests to run: all, hnsw_flat, hnsw_sq, hnsw_pq
     std::vector<std::string> which = {"all"};
@@ -113,12 +126,17 @@ public:
     
     struct TestResult {
         std::string method;       // HNSW-Flat / HNSW-SQ / HNSW-PQ
-        std::string params;       // printable params
+        // Dataset level
+        int dim = 0;
+        int nb = 0;
+        int nq = 0;
+        int k = 0;
         int hnsw_M = 0;
         int efC = 0;
         int efS = 0;
         int pq_m = 0;
         int pq_nbits = 0;
+        double pq_train_ratio = 1.0; // valid for PQ rows
         int qtype = -1;           // for SQ
 
         double train_time = 0.0;  // seconds
@@ -151,8 +169,7 @@ public:
     TestResult testHNSWFlat(int hnsw_m, int efC, int efS) {
         std::cout << "  测试 IndexHNSWFlat (M=" << hnsw_m << ", efC=" << efC << ", efS=" << efS << ")..." << std::endl;
         TestResult r{};
-        r.method = "HNSW-Flat";
-        r.params = "HNSW_M=" + std::to_string(hnsw_m) + ", efC=" + std::to_string(efC) + ", efS=" + std::to_string(efS);
+    r.method = "HNSW-Flat";
         r.hnsw_M = hnsw_m; r.efC = efC; r.efS = efS;
         try {
             faiss::IndexHNSWFlat index(dim, hnsw_m);
@@ -194,8 +211,7 @@ public:
     TestResult testHNSWSQ(int qtype, int hnsw_m, int efC, int efS) {
         std::cout << "  测试 IndexHNSWSQ (" << qtypeName(qtype) << ", M=" << hnsw_m << ", efC=" << efC << ", efS=" << efS << ")..." << std::endl;
         TestResult r{};
-        r.method = "HNSW-SQ";
-        r.params = "HNSW_M=" + std::to_string(hnsw_m) + ", " + qtypeName(qtype) + ", efS=" + std::to_string(efS);
+    r.method = "HNSW-SQ";
         r.hnsw_M = hnsw_m; r.efC = efC; r.efS = efS; r.qtype = qtype;
         try {
             faiss::IndexHNSWSQ index(dim, (faiss::ScalarQuantizer::QuantizerType)qtype, hnsw_m, faiss::METRIC_L2);
@@ -251,9 +267,9 @@ public:
     TestResult testHNSWPQ(int pq_m, int pq_nbits, int hnsw_m, int efC, int efS, double train_ratio) {
         std::cout << "  测试 IndexHNSWPQ (M=" << hnsw_m << ", PQ(m=" << pq_m << ", nbits=" << pq_nbits << "), efC=" << efC << ", efS=" << efS << ", tr=" << train_ratio << ")..." << std::endl;
         TestResult r{};
-        r.method = "HNSW-PQ";
-        r.params = "HNSW_M=" + std::to_string(hnsw_m) + ", PQ(m=" + std::to_string(pq_m) + ",nbits=" + std::to_string(pq_nbits) + ")";
+    r.method = "HNSW-PQ";
         r.hnsw_M = hnsw_m; r.efC = efC; r.efS = efS; r.pq_m = pq_m; r.pq_nbits = pq_nbits;
+    r.pq_train_ratio = train_ratio;
         try {
             if (dim % pq_m != 0) {
                 std::cout << "    跳过：dim=" << dim << " 不能被 m=" << pq_m << " 整除" << std::endl;
@@ -335,17 +351,69 @@ public:
             return std::find(opt.which.begin(), opt.which.end(), what) != opt.which.end();
         };
 
-        if (contains("hnsw_flat")) {
-            auto r = testHNSWFlat(opt.hnsw_M, opt.efC, opt.efS);
-            if (r.build_time >= 0) results.push_back(r);
-        }
-        if (contains("hnsw_sq")) {
-            auto r = testHNSWSQ(opt.sq_qtype, opt.hnsw_M, opt.efC, opt.efS);
-            if (r.build_time >= 0) results.push_back(r);
-        }
-        if (contains("hnsw_pq")) {
-            auto r = testHNSWPQ(opt.pq_m, opt.pq_nbits, opt.hnsw_M, opt.efC, opt.efS, opt.pq_train_ratio);
-            if (r.build_time >= 0) results.push_back(r);
+        // Prepare lists (fallback to single value if list empty)
+        auto prepareIntList = [](const std::vector<int>& lst, int single){ return lst.empty() ? std::vector<int>{single} : lst; };
+        auto prepareDoubleList = [](const std::vector<double>& lst, double single){ return lst.empty() ? std::vector<double>{single} : lst; };
+
+        auto dim_list = prepareIntList(opt.dim_list, opt.dim);
+        auto nb_list = prepareIntList(opt.nb_list, opt.nb);
+        auto nq_list = prepareIntList(opt.nq_list, opt.nq);
+        auto k_list = prepareIntList(opt.k_list, opt.k);
+        auto hnsw_M_list = prepareIntList(opt.hnsw_M_list, opt.hnsw_M);
+        auto efC_list = prepareIntList(opt.efC_list, opt.efC);
+        auto efS_list = prepareIntList(opt.efS_list, opt.efS);
+        auto pq_m_list = prepareIntList(opt.pq_m_list, opt.pq_m);
+        auto pq_nbits_list = prepareIntList(opt.pq_nbits_list, opt.pq_nbits);
+        auto pq_train_ratio_list = prepareDoubleList(opt.pq_train_ratio_list, opt.pq_train_ratio);
+        auto sq_qtype_list = prepareIntList(opt.sq_qtype_list, opt.sq_qtype);
+
+        // Iterate over dataset-level combinations first: dim, nb, nq, k
+        for (int dim_v : dim_list) {
+            for (int nb_v : nb_list) {
+                for (int nq_v : nq_list) {
+                    for (int k_v : k_list) {
+                        // Rebuild benchmark data for each dataset combo
+                        PQBenchmark bench_local(dim_v, nb_v, nq_v, k_v);
+                        // HNSW param combos
+                        for (int hM : hnsw_M_list) {
+                            for (int efC_v : efC_list) {
+                                for (int efS_v : efS_list) {
+                                    if (contains("hnsw_flat")) {
+                                        auto r = bench_local.testHNSWFlat(hM, efC_v, efS_v);
+                                        if (r.build_time >= 0) {
+                                            r.dim = dim_v; r.nb = nb_v; r.nq = nq_v; r.k = k_v;
+                                            results.push_back(r);
+                                        }
+                                    }
+                                    if (contains("hnsw_sq")) {
+                                        for (int qtype_v : sq_qtype_list) {
+                                            auto r = bench_local.testHNSWSQ(qtype_v, hM, efC_v, efS_v);
+                                            if (r.build_time >= 0) {
+                                                r.dim = dim_v; r.nb = nb_v; r.nq = nq_v; r.k = k_v;
+                                                results.push_back(r);
+                                            }
+                                        }
+                                    }
+                                    if (contains("hnsw_pq")) {
+                                        for (int m_v : pq_m_list) {
+                                            for (int nbits_v : pq_nbits_list) {
+                                                for (double tr_v : pq_train_ratio_list) {
+                                                    auto r = bench_local.testHNSWPQ(m_v, nbits_v, hM, efC_v, efS_v, tr_v);
+                                                    if (r.build_time >= 0) {
+                                                        r.dim = dim_v; r.nb = nb_v; r.nq = nq_v; r.k = k_v;
+                                                        r.pq_train_ratio = tr_v;
+                                                        results.push_back(r);
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
         return results;
     }
@@ -361,14 +429,25 @@ public:
         // Best by recall and fastest
         auto best_recall = *std::max_element(results.begin(), results.end(), [](const TestResult& a, const TestResult& b){ return a.recall_10 < b.recall_10; });
         auto fastest = *std::min_element(results.begin(), results.end(), [](const TestResult& a, const TestResult& b){ return a.search_time_ms < b.search_time_ms; });
-    std::cout << "🎯 最高召回: " << best_recall.method << "(" << best_recall.params << ") R@" << k << "=" << std::fixed << std::setprecision(3) << best_recall.recall_10 << std::endl;
-        std::cout << "⚡ 最快搜索: " << fastest.method << "(" << fastest.params << ") " << std::setprecision(2) << fastest.search_time_ms << " ms/query" << std::endl;
+        auto fmtParams = [](const TestResult& r){
+            std::ostringstream oss;
+            oss << "M=" << r.hnsw_M;
+            if (r.method == "HNSW-SQ") {
+                oss << "," << PQBenchmark::qtypeName(r.qtype);
+            } else if (r.method == "HNSW-PQ") {
+                oss << ",PQ(m=" << r.pq_m << ",nbits=" << r.pq_nbits << ",tr=" << std::fixed << std::setprecision(2) << r.pq_train_ratio << ")";
+            }
+            oss << ",efC=" << r.efC << ",efS=" << r.efS;
+            return oss.str();
+        };
+        std::cout << "🎯 最高召回: " << best_recall.method << "(" << fmtParams(best_recall) << ") R@" << k << "=" << std::fixed << std::setprecision(3) << best_recall.recall_10 << std::endl;
+        std::cout << "⚡ 最快搜索: " << fastest.method << "(" << fmtParams(fastest) << ") " << std::setprecision(2) << fastest.search_time_ms << " ms/query" << std::endl;
 
         // Detailed table
     std::cout << "\n📊 详细结果:" << std::endl;
     std::string rcol = std::string("R@") + std::to_string(k);
     std::cout << std::setw(12) << "Method"
-                  << std::setw(30) << "Params"
+                  << std::setw(30) << "Config"
                   << std::setw(8) << "efS"
                   << std::setw(10) << "Train(s)"
                   << std::setw(10) << "Add(s)"
@@ -379,8 +458,11 @@ public:
                   << std::setw(10) << "Compress" << std::endl;
         std::cout << std::string(130, '-') << std::endl;
         for (const auto& r : results) {
+            std::ostringstream cfg; cfg << "M=" << r.hnsw_M;
+            if (r.method == "HNSW-SQ") cfg << "," << PQBenchmark::qtypeName(r.qtype);
+            if (r.method == "HNSW-PQ") cfg << ",PQ(m=" << r.pq_m << ",nbits=" << r.pq_nbits << ",tr=" << std::fixed << std::setprecision(2) << r.pq_train_ratio << ")";
             std::cout << std::setw(12) << r.method
-                      << std::setw(30) << r.params
+                      << std::setw(30) << cfg.str()
                       << std::setw(8) << r.efS
                       << std::setw(10) << std::fixed << std::setprecision(2) << r.train_time
                       << std::setw(10) << std::setprecision(2) << r.add_time
@@ -396,11 +478,12 @@ public:
     void saveResults(const std::vector<TestResult>& results, const std::string& path) {
         std::ofstream csv_file(path);
         if (csv_file.is_open()) {
-            csv_file << "method,params,hnsw_M,efC,efS,pq_m,pq_nbits,qtype,train_time,add_time,build_time,search_time_ms,recall_at_1,recall_at_5,recall_at_10,memory_mb,compression_ratio\n";
+            csv_file << "method,dim,nb,nq,k,hnsw_M,efC,efS,pq_m,pq_nbits,pq_train_ratio,qtype,train_time,add_time,build_time,search_time_ms,recall_at_1,recall_at_5,recall_at_10,memory_mb,compression_ratio\n";
             for (const auto& r : results) {
-                csv_file << r.method << "," << r.params << ","
+                csv_file << r.method << ","
+                         << r.dim << "," << r.nb << "," << r.nq << "," << r.k << ","
                          << r.hnsw_M << "," << r.efC << "," << r.efS << ","
-                         << r.pq_m << "," << r.pq_nbits << "," << qtypeName(r.qtype) << ","
+                         << r.pq_m << "," << r.pq_nbits << "," << r.pq_train_ratio << "," << qtypeName(r.qtype) << ","
                          << r.train_time << "," << r.add_time << "," << r.build_time << "," << r.search_time_ms << ","
                          << r.recall_1 << "," << r.recall_5 << "," << r.recall_10 << ","
                          << r.memory_mb << "," << r.compression_ratio << "\n";
@@ -429,44 +512,61 @@ static std::vector<std::string> splitCSV(const std::string& s) {
     return out;
 }
 
+static std::vector<int> toIntList(const std::string& s) {
+    std::vector<int> v; auto parts = splitCSV(s); v.reserve(parts.size());
+    for (auto &p : parts) { try { v.push_back(std::stoi(p)); } catch (...) {} }
+    return v;
+}
+
+static std::vector<double> toDoubleList(const std::string& s) {
+    std::vector<double> v; auto parts = splitCSV(s); v.reserve(parts.size());
+    for (auto &p : parts) { try { v.push_back(std::stod(p)); } catch (...) {} }
+    return v;
+}
+
 int main(int argc, char** argv) {
     Options opt;
     // Naive CLI parsing
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i]; auto next = [&](int& dst){ if (i + 1 < argc) dst = std::stoi(argv[++i]); };
         auto nexts = [&](std::string& dst){ if (i + 1 < argc) dst = argv[++i]; };
-        if (a == "--dim") next(opt.dim);
-        else if (a == "--nb") next(opt.nb);
-        else if (a == "--nq") next(opt.nq);
-        else if (a == "--k") next(opt.k);
-        else if (a == "--hnsw-M") next(opt.hnsw_M);
-        else if (a == "--efC") next(opt.efC);
-        else if (a == "--efS") next(opt.efS);
-        else if (a == "--pq-m") next(opt.pq_m);
-        else if (a == "--pq-nbits") next(opt.pq_nbits);
+        auto handleListOrSingleInt = [&](std::vector<int>& lst, int &single){ std::string s; nexts(s); if (s.find(',') != std::string::npos) lst = toIntList(s); else { try { single = std::stoi(s); } catch (...) {} } }; 
+        if (a == "--dim") { handleListOrSingleInt(opt.dim_list, opt.dim); }
+        else if (a == "--nb") { handleListOrSingleInt(opt.nb_list, opt.nb); }
+        else if (a == "--nq") { handleListOrSingleInt(opt.nq_list, opt.nq); }
+        else if (a == "--k") { handleListOrSingleInt(opt.k_list, opt.k); }
+        else if (a == "--hnsw-M") { handleListOrSingleInt(opt.hnsw_M_list, opt.hnsw_M); }
+        else if (a == "--efC") { handleListOrSingleInt(opt.efC_list, opt.efC); }
+        else if (a == "--efS") { handleListOrSingleInt(opt.efS_list, opt.efS); }
+        else if (a == "--pq-m") { handleListOrSingleInt(opt.pq_m_list, opt.pq_m); }
+        else if (a == "--pq-nbits") { handleListOrSingleInt(opt.pq_nbits_list, opt.pq_nbits); }
         else if (a == "--pq-train-ratio") {
             std::string s; nexts(s);
-            try { opt.pq_train_ratio = std::stod(s); } catch (...) {}
-            if (opt.pq_train_ratio < 0.0) opt.pq_train_ratio = 0.0;
-            if (opt.pq_train_ratio > 1.0) opt.pq_train_ratio = 1.0;
+            if (s.find(',') != std::string::npos) {
+                opt.pq_train_ratio_list = toDoubleList(s);
+            } else {
+                try { opt.pq_train_ratio = std::stod(s); } catch (...) {}
+                if (opt.pq_train_ratio < 0.0) opt.pq_train_ratio = 0.0;
+                if (opt.pq_train_ratio > 1.0) opt.pq_train_ratio = 1.0;
+            }
         }
-        else if (a == "--sq-qtype") { std::string s; nexts(s); opt.sq_qtype = parseQType(s); }
+        else if (a == "--sq-qtype") { std::string s; nexts(s); if (s.find(',') != std::string::npos) { auto parts = splitCSV(s); for (auto &p: parts) opt.sq_qtype_list.push_back(parseQType(p)); } else { opt.sq_qtype = parseQType(s); } }
         else if (a == "--which") { std::string s; nexts(s); opt.which = splitCSV(s); }
         else if (a == "--out-csv") nexts(opt.out_csv);
         else if (a == "-h" || a == "--help") {
             std::cout << "Usage: ./bench [options]\n"
-                         "  --dim INT           vector dim (default 128)\n"
-                         "  --nb INT            database size (default 20000)\n"
-                         "  --nq INT            queries count (default 500)\n"
-                         "  --k INT             top-k (default 10)\n"
-                         "  --hnsw-M INT        HNSW M (default 32)\n"
-                         "  --efC INT           HNSW efConstruction (default 200)\n"
-                         "  --efS INT           HNSW efSearch (default 64)\n"
-                         "  --pq-m INT          PQ m for HNSW-PQ (default 16)\n"
-                         "  --pq-nbits INT      PQ nbits for HNSW-PQ (default 8)\n"
-                         "  --pq-train-ratio F  PQ train ratio in [0,1] (default 1.0)\n"
-                         "  --sq-qtype STR      SQ qtype for HNSW-SQ (QT_8bit|QT_4bit|QT_8bit_uniform|QT_fp16)\n"
-                         "  --which STR         comma list: all|hnsw_flat|hnsw_sq|hnsw_pq (default all)\n"
+                         "  --dim INT[,INT...]           vector dim list (default 128)\n"
+                         "  --nb INT[,INT...]            database size list (default 20000)\n"
+                         "  --nq INT[,INT...]            queries count list (default 500)\n"
+                         "  --k INT[,INT...]             top-k list (default 10)\n"
+                         "  --hnsw-M INT[,INT...]        HNSW M list (default 32)\n"
+                         "  --efC INT[,INT...]           HNSW efConstruction list (default 200)\n"
+                         "  --efS INT[,INT...]           HNSW efSearch list (default 64)\n"
+                         "  --pq-m INT[,INT...]          PQ m list for HNSW-PQ (default 16)\n"
+                         "  --pq-nbits INT[,INT...]      PQ nbits list for HNSW-PQ (default 8)\n"
+                         "  --pq-train-ratio F[,F...]    PQ train ratio list in [0,1] (default 1.0)\n"
+                         "  --sq-qtype STR[,STR...]      SQ qtype list (QT_8bit|QT_4bit|QT_8bit_uniform|QT_fp16)\n"
+                         "  --which STR                  comma list: all|hnsw_flat|hnsw_sq|hnsw_pq (default all)\n"
                          "  --out-csv PATH      output csv path (default hnsw_index_types_results.csv)\n";
             return 0;
         }
