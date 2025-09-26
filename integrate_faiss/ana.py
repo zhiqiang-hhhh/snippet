@@ -1,36 +1,64 @@
+import os
 import pandas as pd
 import matplotlib.pyplot as plt
 from math import ceil
 
+"""
+使用用户提供的两组新数据（128 维、268 维），替换旧数据并重新画图。
+数据列：
+- Dim, Rows, Method, Config, efS, Train(s), Add(s), Build(s), Search(ms), R@100, mbs_on_disk, Compress
+"""
+
 # ===============================
-# 1. 数据准备
+# 1. 数据准备（来自用户提供的数据）
 # ===============================
-data = [
-    # Rows, Method, Params, Train Time(s), Build Time(s), Total Time(s),
-    # Search Time(ms), Recall@100, Mem(MB), Compress
-    [10000, "HNSW-Flat", "M=32", 0.00, 0.22, 0.22, 0.01, 0.788, 4.9, 1.0],
-    [10000, "HNSW-SQ8", "M=32, QT_8bit", 0.00, 1.69, 1.70, 0.06, 0.787, 1.2, 4.0],
-    [10000, "HNSW-SQ4", "M=32, QT_4bit", 0.00, 2.57, 2.57, 0.07, 0.703, 0.6, 8.0],
-    [50000, "HNSW-Flat", "M=32", 0.00, 7.82, 7.82, 0.02, 0.502, 24.4, 1.0],
-    [50000, "HNSW-SQ8", "M=32, QT_8bit", 0.01, 86.39, 86.40, 0.08, 0.505, 6.1, 4.0],
-    [50000, "HNSW-SQ4", "M=32, QT_4bit", 0.01, 77.14, 77.15, 0.11, 0.456, 3.1, 8.0],
-    [100000, "HNSW-Flat", "M=32", 0.00, 22.28, 22.28, 0.04, 0.378, 48.8, 1.0],
-    [100000, "HNSW-SQ8", "M=32, QT_8bit", 0.01, 226.14, 226.15, 0.08, 0.381, 12.2, 4.0],
-    [100000, "HNSW-SQ4", "M=32, QT_4bit", 0.01, 207.30, 207.32, 0.11, 0.355, 6.1, 8.0]
+data_rows = [
+    # 128 维，Rows = 10k
+    [128, 10000, "HNSW-Flat", "M=32", 64, 0.00, 0.24, 0.24, 0.01, 0.786, 7.5, 0.7],
+    [128, 10000, "HNSW-SQ8",  "M=32,QT_8bit", 64, 0.00, 1.78, 1.78, 0.06, 0.783, 3.8, 1.3],
+    [128, 10000, "HNSW-SQ4",  "M=32,QT_4bit", 64, 0.00, 2.52, 2.52, 0.07, 0.702, 3.2, 1.5],
+    [128, 10000, "HNSW-PQ",   "M=32,PQ(m=64,nbits=8,tr=1.00)", 64, 6.61, 0.57, 7.18, 0.02, 0.728, 3.3, 1.5],
+    # 128 维，Rows = 50k
+    [128, 50000, "HNSW-Flat", "M=32", 64, 0.00, 7.65, 7.65, 0.02, 0.502, 37.4, 0.7],
+    [128, 50000, "HNSW-SQ8",  "M=32,QT_8bit", 64, 0.01, 86.37, 86.38, 0.08, 0.503, 19.1, 1.3],
+    [128, 50000, "HNSW-SQ4",  "M=32,QT_4bit", 64, 0.01, 77.11, 77.12, 0.11, 0.457, 16.0, 1.5],
+    [128, 50000, "HNSW-PQ",   "M=32,PQ(m=64,nbits=8,tr=1.00)", 64, 31.44, 20.82, 52.26, 0.02, 0.487, 16.2, 1.5],
+    # 128 维，Rows = 100k
+    [128, 100000, "HNSW-Flat", "M=32", 64, 0.00, 21.71, 21.71, 0.03, 0.387, 74.8, 0.7],
+    [128, 100000, "HNSW-SQ8",  "M=32,QT_8bit", 64, 0.01, 226.64, 226.66, 0.08, 0.376, 38.2, 1.3],
+    [128, 100000, "HNSW-SQ4",  "M=32,QT_4bit", 64, 0.01, 207.03, 207.04, 0.11, 0.351, 32.1, 1.5],
+    [128, 100000, "HNSW-PQ",   "M=32,PQ(m=64,nbits=8,tr=1.00)", 64, 39.99, 61.25, 101.23, 0.03, 0.363, 32.2, 1.5],
+
+    # 268 维，Rows = 10k
+    [268, 10000, "HNSW-Flat", "M=32", 64, 0.00, 0.70, 0.70, 0.02, 0.689, 12.4, 0.8],
+    [268, 10000, "HNSW-SQ8",  "M=32,QT_8bit", 64, 0.00, 7.91, 7.91, 0.12, 0.684, 5.0, 1.9],
+    [268, 10000, "HNSW-SQ4",  "M=32,QT_4bit", 64, 0.00, 10.76, 10.76, 0.15, 0.625, 3.8, 2.6],
+    [268, 10000, "HNSW-PQ",   "M=32,PQ(m=128,nbits=8,tr=1.00)", 64, 12.85, 2.72, 15.56, 0.03, 0.643, 4.1, 2.4],
+    # 268 维，Rows = 50k
+    [268, 50000, "HNSW-Flat", "M=32", 64, 0.00, 17.33, 17.33, 0.04, 0.330, 61.8, 0.8],
+    [268, 50000, "HNSW-SQ8",  "M=32,QT_8bit", 64, 0.01, 217.44, 217.45, 0.16, 0.336, 25.2, 1.9],
+    [268, 50000, "HNSW-SQ4",  "M=32,QT_4bit", 64, 0.01, 204.41, 204.42, 0.20, 0.313, 19.1, 2.6],
+    [268, 50000, "HNSW-PQ",   "M=32,PQ(m=128,nbits=8,tr=1.00)", 64, 62.83, 88.18, 151.01, 0.05, 0.324, 19.3, 2.5],
+    # 268 维，Rows = 100k
+    [268, 100000, "HNSW-Flat", "M=32", 64, 0.00, 42.72, 42.72, 0.06, 0.215, 123.6, 0.8],
+    [268, 100000, "HNSW-SQ8",  "M=32,QT_8bit", 64, 0.03, 501.92, 501.94, 0.16, 0.225, 50.4, 1.9],
+    [268, 100000, "HNSW-SQ4",  "M=32,QT_4bit", 64, 0.03, 490.05, 490.08, 0.21, 0.203, 38.2, 2.6],
+    [268, 100000, "HNSW-PQ",   "M=32,PQ(m=128,nbits=8,tr=1.00)", 64, 82.64, 217.02, 299.66, 0.05, 0.229, 38.4, 2.5],
 ]
 
 columns = [
-    "Rows", "Method", "Params",
-    "Train Time(s)", "Build Time(s)", "Total Time(s)",
-    "Search Time(ms)", "Recall@100", "Mem(MB)", "Compress"
+    "Dim", "Rows", "Method", "Config", "efS",
+    "Train(s)", "Add(s)", "Build(s)",
+    "Search(ms)", "R@100", "mbs_on_disk", "Compress",
 ]
 
-df = pd.DataFrame(data, columns=columns)
+df = pd.DataFrame(data_rows, columns=columns)
 
 # ===============================
 # 2. 保存 CSV 文件
 # ===============================
-csv_path = "hnsw_results.csv"
+out_dir = os.path.dirname(__file__)
+csv_path = os.path.join(out_dir, "hnsw_results.csv")
 df.to_csv(csv_path, index=False)
 print(f"CSV 已生成: {csv_path}")
 
@@ -164,46 +192,208 @@ def plot_grouped_bars(
     print(f"图片已生成(柱状图): {out_png}")
     plt.close(fig)
 
+# ===============================
+# 4. 分维度绘图
+# ===============================
+dims = sorted(df["Dim"].unique())
+for dim in dims:
+    sub = df[df["Dim"] == dim].copy()
+    suffix = f"_dim{dim}"
 
-# Build Time 分组柱状图
-plot_grouped_bars(
+    # Build Time 分组柱状图（使用 Build(s)）
+    plot_grouped_bars(
+        sub,
+        x_col="Rows",
+        y_col="Build(s)",
+        group_col="Method",
+        title=f"Build Time vs Rows (Dim={dim})",
+        ylabel="Build Time (s)",
+        out_png=os.path.join(out_dir, f"build_time_vs_rows{suffix}.png"),
+        value_fmt="{:.2f}",
+        legend_loc="upper left",
+        legend_inside=True,
+    )
+
+    # Index Size on Disk 分组柱状图
+    plot_grouped_bars(
+        sub,
+        x_col="Rows",
+        y_col="mbs_on_disk",
+        group_col="Method",
+        title=f"Index Size on Disk vs Rows (Dim={dim})",
+        ylabel="Index Size on Disk (MB)",
+        out_png=os.path.join(out_dir, f"disk_size_vs_rows{suffix}.png"),
+        value_fmt="{:.1f}",
+        legend_loc="upper left",
+        legend_inside=True,
+    )
+
+    # Recall@100 分组柱状图
+    plot_grouped_bars(
+        sub,
+        x_col="Rows",
+        y_col="R@100",
+        group_col="Method",
+        title=f"Recall@100 vs Rows (Dim={dim})",
+        ylabel="Recall@100",
+        out_png=os.path.join(out_dir, f"recall_vs_rows{suffix}.png"),
+        value_fmt="{:.3f}",
+        legend_loc="upper left",
+        legend_inside=True,
+    )
+
+    # Search(ms) 分组柱状图
+    plot_grouped_bars(
+        sub,
+        x_col="Rows",
+        y_col="Search(ms)",
+        group_col="Method",
+        title=f"Search Time vs Rows (Dim={dim})",
+        ylabel="Search Time (ms)",
+        out_png=os.path.join(out_dir, f"search_time_vs_rows{suffix}.png"),
+        value_fmt="{:.2f}",
+        legend_loc="upper left",
+        legend_inside=True,
+    )
+
+print("全部柱状图绘制完成（按维度输出）。")
+
+############################################################
+# 5. 维度对比：并排子图（优雅地同时展示 Dim 变化）
+############################################################
+
+from matplotlib.patches import Patch
+
+METHOD_ORDER = ["HNSW-Flat", "HNSW-SQ8", "HNSW-SQ4", "HNSW-PQ"]
+BASE_COLORS = list(plt.get_cmap("tab10").colors)
+COLOR_MAP = {m: BASE_COLORS[i % len(BASE_COLORS)] for i, m in enumerate(METHOD_ORDER)}
+
+
+def draw_grouped_bars_on_ax(ax, data: pd.DataFrame, x_col: str, y_col: str, methods: list[str], value_fmt: str):
+    """在给定 ax 上绘制分组柱状图，按固定方法顺序与一致配色。"""
+    categories = sorted(data[x_col].unique())
+    n_cat = len(categories)
+    n_grp = len(methods)
+    total_group_width = 0.82
+    bar_width = total_group_width / max(1, n_grp)
+    x_index = list(range(n_cat))
+
+    for gi, method in enumerate(methods):
+        subset = data[data["Method"] == method]
+        if subset.empty:
+            continue
+        y_vals = []
+        for c in categories:
+            vals = subset[subset[x_col] == c][y_col].values
+            y_vals.append(vals[0] if len(vals) else 0.0)
+
+        offsets = [x + (gi - n_grp / 2) * bar_width + bar_width / 2 for x in x_index]
+        bars = ax.bar(
+            offsets,
+            y_vals,
+            width=bar_width * 0.92,
+            color=COLOR_MAP.get(method, BASE_COLORS[gi % len(BASE_COLORS)]),
+            edgecolor="#333",
+            linewidth=0.5,
+            label=method,
+        )
+        for b, v in zip(bars, y_vals):
+            ax.text(
+                b.get_x() + b.get_width() / 2,
+                b.get_height(),
+                value_fmt.format(v),
+                ha="center",
+                va="bottom",
+                fontsize=9,
+                color="#222",
+            )
+
+    ax.set_xticks(list(range(n_cat)))
+    ax.set_xticklabels([str(c) for c in categories], fontsize=10)
+    ax.yaxis.grid(True, linestyle="--", linewidth=0.6, alpha=0.5)
+    ax.set_axisbelow(True)
+    for spine in ["top", "right"]:
+        ax.spines[spine].set_visible(False)
+
+
+def plot_dim_side_by_side(
+    df: pd.DataFrame,
+    dims_to_show: list[int],
+    x_col: str,
+    y_col: str,
+    ylabel: str,
+    title_prefix: str,
+    out_png: str,
+    value_fmt: str,
+):
+    fig, axes = plt.subplots(1, len(dims_to_show), figsize=(11, 4.6), dpi=140, sharey=True)
+    if len(dims_to_show) == 1:
+        axes = [axes]
+
+    for ax, d in zip(axes, dims_to_show):
+        sub = df[df["Dim"] == d]
+        draw_grouped_bars_on_ax(ax, sub, x_col=x_col, y_col=y_col, methods=METHOD_ORDER, value_fmt=value_fmt)
+        ax.set_xlabel(x_col, fontsize=11)
+        ax.set_title(f"Dim={d}", fontsize=12, pad=8)
+        ax.set_ylabel(ylabel, fontsize=11)
+
+    legend_handles = [Patch(facecolor=COLOR_MAP[m], edgecolor="#333", label=m) for m in METHOD_ORDER]
+    fig.legend(
+        handles=legend_handles,
+        loc="upper center",
+        ncol=min(4, len(METHOD_ORDER)),
+        frameon=False,
+        fontsize=10,
+        bbox_to_anchor=(0.5, 1.05),
+    )
+    fig.suptitle(f"{title_prefix}", fontsize=13, y=1.08)
+    fig.tight_layout()
+    plt.savefig(out_png, bbox_inches="tight")
+    print(f"图片已生成(维度对比): {out_png}")
+    plt.close(fig)
+
+
+# 生成三类并排维度对比图
+plot_dim_side_by_side(
     df,
+    dims_to_show=dims,
     x_col="Rows",
-    y_col="Build Time(s)",
-    group_col="Method",
-    title="Build Time vs Rows (Grouped Bars)",
+    y_col="Build(s)",
     ylabel="Build Time (s)",
-    out_png="build_time_vs_rows.png",
+    title_prefix="Build Time vs Rows (Dim Comparison)",
+    out_png=os.path.join(out_dir, "build_time_vs_rows_dims_compare.png"),
     value_fmt="{:.2f}",
-    legend_loc="upper left",
-    legend_inside=True,
 )
 
-# Memory Usage 分组柱状图
-plot_grouped_bars(
+plot_dim_side_by_side(
     df,
+    dims_to_show=dims,
     x_col="Rows",
-    y_col="Mem(MB)",
-    group_col="Method",
-    title="Memory Usage vs Rows (Grouped Bars)",
-    ylabel="Memory (MB)",
-    out_png="memory_usage_vs_rows.png",
+    y_col="mbs_on_disk",
+    ylabel="Index Size on Disk (MB)",
+    title_prefix="Index Size on Disk vs Rows (Dim Comparison)",
+    out_png=os.path.join(out_dir, "disk_size_vs_rows_dims_compare.png"),
     value_fmt="{:.1f}",
-    legend_loc="upper left",
-    legend_inside=True,
 )
 
-# 额外：Recall@100 分组柱状图（可帮助直观看质量差异）
-plot_grouped_bars(
+plot_dim_side_by_side(
     df,
+    dims_to_show=dims,
     x_col="Rows",
-    y_col="Recall@100",
-    group_col="Method",
-    title="Recall@100 vs Rows (Grouped Bars)",
+    y_col="R@100",
     ylabel="Recall@100",
-    out_png="recall_vs_rows.png",
+    title_prefix="Recall@100 vs Rows (Dim Comparison)",
+    out_png=os.path.join(out_dir, "recall_vs_rows_dims_compare.png"),
     value_fmt="{:.3f}",
-    legend_loc="upper left",
-    legend_inside=True,
 )
-print("全部柱状图绘制完成。")
+
+plot_dim_side_by_side(
+    df,
+    dims_to_show=dims,
+    x_col="Rows",
+    y_col="Search(ms)",
+    ylabel="Search Time (ms)",
+    title_prefix="Search Time vs Rows (Dim Comparison)",
+    out_png=os.path.join(out_dir, "search_time_vs_rows_dims_compare.png"),
+    value_fmt="{:.2f}",
+)

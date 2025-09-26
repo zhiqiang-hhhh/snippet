@@ -81,6 +81,9 @@ struct Options {
 
   // Output
   std::string out_csv = "hnsw_index_types_results.csv";
+
+  // Whether to build transposed centroids for PQ (optimization)
+  bool transpose_centroid = false;
 };
 
 class PQBenchmark {
@@ -89,13 +92,16 @@ private:
   int nb;
   int nq;
   int k;
+  bool
+      transpose_centroid; // control whether to sync transposed centroids for PQ
   std::vector<float> database;
   std::vector<float> queries;
   std::vector<faiss::idx_t> ground_truth;
 
 public:
-  PQBenchmark(int dim = 128, int nb = 20000, int nq = 500, int k = 10)
-      : dim(dim), nb(nb), nq(nq), k(k) {
+  PQBenchmark(int dim = 128, int nb = 20000, int nq = 500, int k = 10,
+              bool transpose_centroid = false)
+      : dim(dim), nb(nb), nq(nq), k(k), transpose_centroid(transpose_centroid) {
     std::cout << "=== HNSW Index Types Benchmark (C++) ===" << std::endl;
     std::cout << "配置: dim=" << dim << ", nb=" << nb << ", nq=" << nq
               << ", k=" << k << std::endl;
@@ -367,6 +373,12 @@ public:
       }
       auto t0 = std::chrono::high_resolution_clock::now();
       index.train(train_n, database.data());
+      if (transpose_centroid) {
+        faiss::IndexPQ *index_pq = static_cast<faiss::IndexPQ *>(index.storage);
+        if (index_pq) {
+          index_pq->pq.sync_transposed_centroids();
+        }
+      }
       auto t1 = std::chrono::high_resolution_clock::now();
       r.train_time = std::chrono::duration<double>(t1 - t0).count();
       auto t2 = std::chrono::high_resolution_clock::now();
@@ -466,7 +478,8 @@ public:
         for (int nq_v : nq_list) {
           for (int k_v : k_list) {
             // Rebuild benchmark data for each dataset combo
-            PQBenchmark bench_local(dim_v, nb_v, nq_v, k_v);
+            PQBenchmark bench_local(dim_v, nb_v, nq_v, k_v,
+                                    opt.transpose_centroid);
             // HNSW param combos
             for (int hM : hnsw_M_list) {
               for (int efC_v : efC_list) {
@@ -747,7 +760,11 @@ int main(int argc, char **argv) {
       opt.which = splitCSV(s);
     } else if (a == "--out-csv")
       nexts(opt.out_csv);
-    else if (a == "-h" || a == "--help") {
+    else if (a == "--transpose-centroid") {
+      opt.transpose_centroid = true;
+    } else if (a == "--no-transpose-centroid") {
+      opt.transpose_centroid = false; // explicit disable
+    } else if (a == "-h" || a == "--help") {
       std::cout
           << "Usage: ./bench [options]\n"
              "  --dim INT[,INT...]           vector dim list (default 128)\n"
@@ -770,13 +787,17 @@ int main(int argc, char **argv) {
              "  --which STR                  comma list: "
              "all|hnsw_flat|hnsw_sq|hnsw_pq (default all)\n"
              "  --out-csv PATH      output csv path (default "
-             "hnsw_index_types_results.csv)\n";
+             "hnsw_index_types_results.csv)\n"
+             "  --transpose-centroid         enable PQ transposed centroids "
+             "(default off)\n"
+             "  --no-transpose-centroid      disable PQ transposed centroids "
+             "(override)\n";
       return 0;
     }
   }
 
   try {
-    PQBenchmark bench(opt.dim, opt.nb, opt.nq, opt.k);
+    PQBenchmark bench(opt.dim, opt.nb, opt.nq, opt.k, opt.transpose_centroid);
     auto results = bench.runIndexTypeBenchmarks(opt);
     bench.printAnalysis(results);
     bench.saveResults(results, opt.out_csv);
