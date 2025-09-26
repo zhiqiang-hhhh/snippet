@@ -560,48 +560,77 @@ public:
       if (r.method == "HNSW-SQ") {
         oss << "," << PQBenchmark::qtypeName(r.qtype);
       } else if (r.method == "HNSW-PQ") {
-        oss << ",PQ(m=" << r.pq_m << ",nbits=" << r.pq_nbits
-            << ",tr=" << std::fixed << std::setprecision(2) << r.pq_train_ratio
-            << ")";
+        oss << ",PQ(m=" << r.pq_m << ",nbits=" << r.pq_nbits << ")";
       }
       oss << ",efC=" << r.efC << ",efS=" << r.efS;
       return oss.str();
     };
-    std::cout << "🎯 最高召回: " << best_recall.method << "("
-              << fmtParams(best_recall) << ") R@" << k << "=" << std::fixed
-              << std::setprecision(3) << best_recall.recall_10 << std::endl;
-    std::cout << "⚡ 最快搜索: " << fastest.method << "(" << fmtParams(fastest)
-              << ") " << std::setprecision(2) << fastest.search_time_ms
-              << " ms/query" << std::endl;
+  std::cout << "🎯 最高召回: " << best_recall.method << "("
+      << fmtParams(best_recall) << ") R@" << best_recall.k << "=" << std::fixed
+      << std::setprecision(3) << best_recall.recall_10 << std::endl;
+  std::cout << "⚡ 最快搜索: " << fastest.method << "(" << fmtParams(fastest)
+      << ") " << std::setprecision(2) << fastest.search_time_ms
+      << " ms/query" << std::endl;
 
     // Detailed table
     std::cout << "\n📊 详细结果:" << std::endl;
-    std::string rcol = std::string("R@") + std::to_string(k);
-    std::cout << std::setw(12) << "Method" << std::setw(30) << "Config"
-              << std::setw(8) << "efS" << std::setw(10) << "Train(s)"
-              << std::setw(10) << "Add(s)" << std::setw(10) << "Build(s)"
-              << std::setw(12) << "Search(ms)" << std::setw(10) << rcol
-              << std::setw(12) << "mbs_on_disk" << std::setw(10) << "Compress"
-              << std::endl;
-    std::cout << std::string(130, '-') << std::endl;
+  // Print header matching CSV columns and order
+  std::cout << std::left
+        << std::setw(12) << "method"
+        << std::setw(6) << "dim"
+        << std::setw(8) << "nb"
+        << std::setw(6) << "nq"
+        << std::setw(4) << "k"
+        << std::setw(8) << "hnsw_M"
+        << std::setw(6) << "efC"
+        << std::setw(6) << "efS"
+        << std::setw(6) << "pq_m"
+        << std::setw(10) << "pq_nbits"
+        << std::setw(18) << "qtype"
+        << std::setw(12) << "train_time"
+        << std::setw(10) << "add_time"
+        << std::setw(12) << "build_time"
+        << std::setw(14) << "search_time_ms"
+        << std::setw(12) << "recall_at_1"
+        << std::setw(12) << "recall_at_5"
+        << std::setw(14) << "recall_at_k"
+        << std::setw(14) << "mbs_on_disk"
+        << std::setw(16) << "compression_ratio"
+        << std::endl;
+  std::cout << std::string(12 + 6 + 8 + 6 + 4 + 8 + 6 + 6 + 6 + 10 + 18 + 12 + 10 + 12 + 14 + 12 + 12 + 14 + 14 + 16, '-')
+        << std::endl;
+
     for (const auto &r : results) {
-      std::ostringstream cfg;
-      cfg << "M=" << r.hnsw_M;
-      if (r.method == "HNSW-SQ")
-        cfg << "," << PQBenchmark::qtypeName(r.qtype);
-      if (r.method == "HNSW-PQ")
-        cfg << ",PQ(m=" << r.pq_m << ",nbits=" << r.pq_nbits
-            << ",tr=" << std::fixed << std::setprecision(2) << r.pq_train_ratio
-            << ")";
-      std::cout << std::setw(12) << r.method << std::setw(30) << cfg.str()
-                << std::setw(8) << r.efS << std::setw(10) << std::fixed
-                << std::setprecision(2) << r.train_time << std::setw(10)
-                << std::setprecision(2) << r.add_time << std::setw(10)
-                << std::setprecision(2) << r.build_time << std::setw(12)
-                << std::setprecision(2) << r.search_time_ms << std::setw(10)
-                << std::setprecision(3) << r.recall_10 << std::setw(12)
-                << std::setprecision(1) << r.mbs_on_disk << std::setw(10)
-                << std::setprecision(1) << r.compression_ratio << std::endl;
+      std::cout << std::left
+                << std::setw(12) << r.method
+                << std::setw(6) << r.dim
+                << std::setw(8) << r.nb
+                << std::setw(6) << r.nq
+                << std::setw(4) << r.k
+                << std::setw(8) << r.hnsw_M
+                << std::setw(6) << r.efC
+                << std::setw(6) << r.efS
+                << std::setw(6) << r.pq_m
+                  << std::setw(10) << r.pq_nbits
+                  << std::setw(18) << PQBenchmark::qtypeName(r.qtype)
+                  << std::setw(12) << std::fixed << std::setprecision(2) << r.train_time
+                  << std::setw(10) << std::fixed << std::setprecision(2) << r.add_time
+                  << std::setw(12) << std::fixed << std::setprecision(2) << r.build_time
+                  << std::setw(14) << std::fixed << std::setprecision(2) << r.search_time_ms
+                  << std::setw(12) << std::fixed << std::setprecision(3) << r.recall_1
+                  << std::setw(12) << std::fixed << std::setprecision(3) << r.recall_5
+                  << std::setw(14) << std::fixed << std::setprecision(3) << r.recall_10
+                  << std::setw(14) << std::fixed << std::setprecision(1) << r.mbs_on_disk;
+      // compression ratio: not applicable for HNSW-Flat
+      {
+        std::ostringstream cr;
+        if (r.method == "HNSW-Flat") {
+          cr << "NA";
+        } else {
+          cr << std::fixed << std::setprecision(1) << r.compression_ratio;
+        }
+        std::cout << std::setw(16) << cr.str() << std::endl;
+      }
     }
   }
 
@@ -610,18 +639,22 @@ public:
     std::ofstream csv_file(path);
     if (csv_file.is_open()) {
       csv_file
-          << "method,dim,nb,nq,k,hnsw_M,efC,efS,pq_m,pq_nbits,pq_train_ratio,"
-             "qtype,train_time,add_time,build_time,search_time_ms,recall_at_1,"
-             "recall_at_5,recall_at_10,mbs_on_disk,compression_ratio\n";
+          << "method,dim,nb,nq,k,hnsw_M,efC,efS,pq_m,pq_nbits,qtype,train_time,add_time,build_time,search_time_ms,recall_at_1,"
+             "recall_at_5,recall_at_k,mbs_on_disk,compression_ratio\n";
       for (const auto &r : results) {
         csv_file << r.method << "," << r.dim << "," << r.nb << "," << r.nq
                  << "," << r.k << "," << r.hnsw_M << "," << r.efC << ","
                  << r.efS << "," << r.pq_m << "," << r.pq_nbits << ","
-                 << r.pq_train_ratio << "," << qtypeName(r.qtype) << ","
-                 << r.train_time << "," << r.add_time << "," << r.build_time
-                 << "," << r.search_time_ms << "," << r.recall_1 << ","
-                 << r.recall_5 << "," << r.recall_10 << "," << r.mbs_on_disk
-                 << "," << r.compression_ratio << "\n";
+                 << qtypeName(r.qtype) << "," << r.train_time << ","
+                 << r.add_time << "," << r.build_time << ","
+                 << r.search_time_ms << "," << r.recall_1 << ","
+                 << r.recall_5 << "," << r.recall_10 << ","
+                 << r.mbs_on_disk << ",";
+        if (r.method == "HNSW-Flat")
+          csv_file << "NA";
+        else
+          csv_file << r.compression_ratio;
+        csv_file << "\n";
       }
       csv_file.close();
       std::cout << "\n💾 结果已保存到: " << path << std::endl;
