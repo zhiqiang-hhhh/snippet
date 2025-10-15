@@ -51,6 +51,9 @@ target_link_libraries(integrate_faiss PRIVATE faiss)
 add_executable(test_hnswpq test_hnswpq.cpp)
 target_link_libraries(test_hnswpq PRIVATE faiss)
 
+add_executable(test_hnswrabitq test_hnswrabitq.cpp)
+target_link_libraries(test_hnswrabitq PRIVATE faiss)
+
 add_executable(sq sq.cpp)
 target_link_libraries(sq PRIVATE faiss)
 

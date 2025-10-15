@@ -1,6 +1,9 @@
+#include "faiss/IndexPreTransform.h"
+#include "faiss/VectorTransform.h"
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cctype>
 #include <cstdlib>
 #include <faiss/IndexFlat.h>
 #include <faiss/IndexHNSW.h>
@@ -80,7 +83,8 @@ struct Options {
   int sq_qtype = (int)faiss::ScalarQuantizer::QuantizerType::QT_8bit;
   std::vector<int> sq_qtype_list;
 
-  // Which tests to run: all, hnsw_flat, hnsw_sq, hnsw_pq
+  // Which tests to run: all, hnsw_flat, hnsw_sq, hnsw_pq, hnsw_rabitq,
+  // ivf_flat, ivf_sq, ivf_pq, ivf_rabitq
   std::vector<std::string> which = {"all"};
 
   // IVF parameters (for IVF-Flat / IVF-PQ / IVF-SQ)
@@ -89,10 +93,11 @@ struct Options {
   std::vector<int> ivf_nlist_list;
   std::vector<int> ivf_nprobe_list;
 
-  // RaBitQ (for IVF-RaBitQ)
+  // RaBitQ (for HNSW/IVF-RaBitQ)
   int rabitq_qb = 8;            // query quantization bits
   bool rabitq_centered = false; // whether to center queries
   std::vector<int> rabitq_qb_list;
+  std::vector<int> rabitq_centered_list;
 
   // Output
   std::string out_csv = "hnsw_index_types_results.csv";
@@ -437,6 +442,72 @@ public:
     return r;
   }
 
+  // HNSW-RaBitQ
+  TestResult testHNSWRaBitQ(
+      int hnsw_m, int efC, int efS, int qb, bool centered) {
+    std::cout << "  测试 IndexHNSWRaBitQ (M=" << hnsw_m << ", efC=" << efC
+              << ", efS=" << efS << ", qb=" << qb
+              << (centered ? ", centered" : "") << ")..." << std::endl;
+    TestResult r{};
+    r.method = "HNSW-RaBitQ";
+    r.hnsw_M = hnsw_m;
+    r.efC = efC;
+    r.efS = efS;
+    r.rabitq_qb = qb;
+    r.rabitq_centered = centered ? 1 : 0;
+    try {
+      faiss::IndexHNSWRaBitQ index(dim, hnsw_m, faiss::METRIC_L2);
+      index.hnsw.efConstruction = efC;
+
+      auto t0 = std::chrono::high_resolution_clock::now();
+      index.train(nb, database.data());
+      auto t1 = std::chrono::high_resolution_clock::now();
+      r.train_time = std::chrono::duration<double>(t1 - t0).count();
+
+      auto t2 = std::chrono::high_resolution_clock::now();
+      index.add(nb, database.data());
+      auto t3 = std::chrono::high_resolution_clock::now();
+      r.add_time = std::chrono::duration<double>(t3 - t2).count();
+      r.build_time = r.train_time + r.add_time;
+
+      index.set_query_quantization(qb, centered);
+
+      faiss::SearchParametersHNSWRaBitQ sp;
+      sp.efSearch = efS;
+      sp.qb = (uint8_t)qb;
+      sp.centered = centered;
+
+      std::vector<float> distances(nq * k);
+      std::vector<faiss::idx_t> labels(nq * k);
+      t0 = std::chrono::high_resolution_clock::now();
+      index.search(
+          nq, queries.data(), k, distances.data(), labels.data(), &sp);
+      t1 = std::chrono::high_resolution_clock::now();
+      r.search_time_ms =
+          std::chrono::duration<double, std::milli>(t1 - t0).count() / nq;
+
+      r.recall_1 = computeRecall(labels, ground_truth, 1);
+      r.recall_5 = computeRecall(labels, ground_truth, 5);
+      r.recall_10 = computeRecall(labels, ground_truth, k);
+
+      r.mbs_on_disk = measureIndexSerializedSize(&index);
+      if (nb > 0) {
+        double per_vec = (r.mbs_on_disk * 1024.0 * 1024.0) / nb;
+        r.compression_ratio = ((double)dim * 4.0) / per_vec;
+      } else {
+        r.compression_ratio = 0.0;
+      }
+      std::cout << std::fixed << std::setprecision(3)
+                << "    训练(train)= " << r.train_time
+                << " s, 建索引(add)= " << r.add_time
+                << " s, 总构建= " << r.build_time << " s" << std::endl;
+    } catch (const std::exception &e) {
+      std::cerr << "    错误: " << e.what() << std::endl;
+      r.build_time = -1;
+    }
+    return r;
+  }
+
   // IVF-Flat
   TestResult testIVFFlat(int nlist, int nprobe) {
     std::cout << "  测试 IndexIVFFlat (nlist=" << nlist << ", nprobe=" << nprobe
@@ -624,15 +695,22 @@ public:
     r.rabitq_qb = qb;
     r.rabitq_centered = centered ? 1 : 0;
     try {
-      faiss::IndexFlatL2 coarse(dim);
-      faiss::IndexIVFRaBitQ index(&coarse, dim, nlist, faiss::METRIC_L2);
-      index.qb = (uint8_t)qb; // default query bits
+      std::unique_ptr<faiss::IndexFlatL2> coarse = std::make_unique<faiss::IndexFlatL2>(dim);
+      std::unique_ptr<faiss::IndexIVFRaBitQ> index = std::make_unique<faiss::IndexIVFRaBitQ>(coarse.release(), dim, nlist, faiss::METRIC_L2);
+      index->nprobe = nprobe;
+      index->own_fields = true;
+      index->qb = (uint8_t)qb; // default query bits
+
+      auto rr = std::make_unique<faiss::RandomRotationMatrix>(dim, dim);
+      auto idx_rr = std::make_unique<faiss::IndexPreTransform>(rr.release(), index.release());
+      idx_rr->own_fields = true;
+
       auto t0 = std::chrono::high_resolution_clock::now();
-      index.train(nb, database.data());
+      idx_rr->train(nb, database.data());
       auto t1 = std::chrono::high_resolution_clock::now();
       r.train_time = std::chrono::duration<double>(t1 - t0).count();
       auto t2 = std::chrono::high_resolution_clock::now();
-      index.add(nb, database.data());
+      idx_rr->add(nb, database.data());
       auto t3 = std::chrono::high_resolution_clock::now();
       r.add_time = std::chrono::duration<double>(t3 - t2).count();
       r.build_time = r.train_time + r.add_time;
@@ -641,14 +719,13 @@ public:
                 << " s, 建索引(add)= " << r.add_time
                 << " s, 总构建= " << r.build_time << " s" << std::endl;
 
-      index.nprobe = nprobe;
       std::vector<float> distances(nq * k);
       std::vector<faiss::idx_t> labels(nq * k);
       faiss::IVFRaBitQSearchParameters sp;
       sp.qb = (uint8_t)qb;
       sp.centered = centered;
       t0 = std::chrono::high_resolution_clock::now();
-      index.search(nq, queries.data(), k, distances.data(), labels.data(), &sp);
+      idx_rr->search(nq, queries.data(), k, distances.data(), labels.data(), &sp);
       t1 = std::chrono::high_resolution_clock::now();
       r.search_time_ms =
           std::chrono::duration<double, std::milli>(t1 - t0).count() / nq;
@@ -657,7 +734,7 @@ public:
       r.recall_5 = computeRecall(labels, ground_truth, 5);
       r.recall_10 = computeRecall(labels, ground_truth, k);
 
-      r.mbs_on_disk = measureIndexSerializedSize(&index);
+      r.mbs_on_disk = measureIndexSerializedSize(idx_rr.get());
       if (nb > 0) {
         double per_vec = (r.mbs_on_disk * 1024.0 * 1024.0) / nb;
         r.compression_ratio = ((double)dim * 4.0) / per_vec;
@@ -727,6 +804,9 @@ public:
     auto ivf_nlist_list = prepareIntList(opt.ivf_nlist_list, opt.ivf_nlist);
     auto ivf_nprobe_list = prepareIntList(opt.ivf_nprobe_list, opt.ivf_nprobe);
     auto rabitq_qb_list = prepareIntList(opt.rabitq_qb_list, opt.rabitq_qb);
+  auto rabitq_centered_list =
+    prepareIntList(
+      opt.rabitq_centered_list, opt.rabitq_centered ? 1 : 0);
 
     // Iterate over dataset-level combinations first: dim, nb, nq, k
     for (int dim_v : dim_list) {
@@ -781,6 +861,22 @@ public:
                       }
                     }
                   }
+                  if (contains("hnsw_rabitq")) {
+                    for (int qb_v : rabitq_qb_list) {
+                      for (int centered_flag : rabitq_centered_list) {
+                        bool centered = centered_flag != 0;
+                        auto r = bench_local.testHNSWRaBitQ(
+                            hM, efC_v, efS_v, qb_v, centered);
+                        if (r.build_time >= 0) {
+                          r.dim = dim_v;
+                          r.nb = nb_v;
+                          r.nq = nq_v;
+                          r.k = k_v;
+                          results.push_back(r);
+                        }
+                      }
+                    }
+                  }
                 }
               }
             }
@@ -829,14 +925,17 @@ public:
                 }
                 if (contains("ivf_rabitq")) {
                   for (int qb_v : rabitq_qb_list) {
-                    auto r = bench_local.testIVFRaBitQ(nl_v, np_v, qb_v,
-                                                       opt.rabitq_centered);
-                    if (r.build_time >= 0) {
-                      r.dim = dim_v;
-                      r.nb = nb_v;
-                      r.nq = nq_v;
-                      r.k = k_v;
-                      results.push_back(r);
+                    for (int centered_flag : rabitq_centered_list) {
+                      bool centered = centered_flag != 0;
+                      auto r = bench_local.testIVFRaBitQ(
+                          nl_v, np_v, qb_v, centered);
+                      if (r.build_time >= 0) {
+                        r.dim = dim_v;
+                        r.nb = nb_v;
+                        r.nq = nq_v;
+                        r.k = k_v;
+                        results.push_back(r);
+                      }
                     }
                   }
                 }
@@ -875,6 +974,11 @@ public:
         oss << "," << PQBenchmark::qtypeName(r.qtype);
       } else if (r.method == "HNSW-PQ") {
         oss << ",PQ(m=" << r.pq_m << ",nbits=" << r.pq_nbits << ")";
+      } else if (r.method == "HNSW-RaBitQ") {
+        oss << ",qb=" << r.rabitq_qb;
+        if (r.rabitq_centered) {
+          oss << ",centered";
+        }
       }
       oss << ",efC=" << r.efC << ",efS=" << r.efS;
       return oss.str();
@@ -1112,9 +1216,32 @@ int main(int argc, char **argv) {
     } else if (a == "--rabitq-qb") {
       handleListOrSingleInt(opt.rabitq_qb_list, opt.rabitq_qb);
     } else if (a == "--rabitq-centered") {
-      int v = 0;
-      next(v);
-      opt.rabitq_centered = (v != 0);
+      std::string s;
+      nexts(s);
+      if (s.find(',') != std::string::npos) {
+        opt.rabitq_centered_list = toIntList(s);
+        for (int &v : opt.rabitq_centered_list) {
+          v = v ? 1 : 0;
+        }
+      } else if (!s.empty()) {
+        try {
+          opt.rabitq_centered = (std::stoi(s) != 0);
+        } catch (...) {
+          std::string lowered = s;
+          std::transform(lowered.begin(), lowered.end(), lowered.begin(),
+                         [](unsigned char c) { return std::tolower(c); });
+          if (lowered == "true" || lowered == "t" || lowered == "yes" ||
+              lowered == "y") {
+            opt.rabitq_centered = true;
+          } else if (lowered == "false" || lowered == "f" ||
+                     lowered == "no" || lowered == "n") {
+            opt.rabitq_centered = false;
+          }
+        }
+      } else {
+        // flag form defaults to true when no explicit value provided
+        opt.rabitq_centered = true;
+      }
     } else if (a == "--which") {
       std::string s;
       nexts(s);
@@ -1149,10 +1276,10 @@ int main(int argc, char **argv) {
              "  --ivf-nprobe INT[,INT...]    IVF nprobe list (default 8)\n"
              "  --rabitq-qb INT[,INT...]     RaBitQ qb bits for query (default "
              "8)\n"
-             "  --rabitq-centered 0|1        RaBitQ centered query flag "
+             "  --rabitq-centered 0|1[,0|1...] RaBitQ centered query flag "
              "(default 0)\n"
              "  --which STR                  comma list: "
-             "all|hnsw_flat|hnsw_sq|hnsw_pq|ivf_flat|ivf_sq|ivf_pq|ivf_rabitq "
+             "all|hnsw_flat|hnsw_sq|hnsw_pq|hnsw_rabitq|ivf_flat|ivf_sq|ivf_pq|ivf_rabitq "
              "(default all)\n"
              "  --out-csv PATH      output csv path (default "
              "hnsw_index_types_results.csv)\n"
