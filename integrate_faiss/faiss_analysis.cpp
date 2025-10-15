@@ -1,9 +1,9 @@
 #include "faiss/IndexPreTransform.h"
 #include "faiss/VectorTransform.h"
 #include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <cmath>
-#include <cctype>
 #include <cstdlib>
 #include <faiss/IndexFlat.h>
 #include <faiss/IndexHNSW.h>
@@ -12,6 +12,7 @@
 #include <faiss/IndexIVFPQ.h>
 #include <faiss/IndexIVFRaBitQ.h>
 #include <faiss/IndexPQ.h>
+#include <faiss/IndexRefine.h>
 #include <faiss/IndexScalarQuantizer.h>
 #include <faiss/MetricType.h>
 #include <faiss/index_io.h>
@@ -84,7 +85,7 @@ struct Options {
   std::vector<int> sq_qtype_list;
 
   // Which tests to run: all, hnsw_flat, hnsw_sq, hnsw_pq, hnsw_rabitq,
-  // ivf_flat, ivf_sq, ivf_pq, ivf_rabitq
+  // ivf_flat, ivf_sq, ivf_pq, ivf_rbq
   std::vector<std::string> which = {"all"};
 
   // IVF parameters (for IVF-Flat / IVF-PQ / IVF-SQ)
@@ -98,6 +99,14 @@ struct Options {
   bool rabitq_centered = false; // whether to center queries
   std::vector<int> rabitq_qb_list;
   std::vector<int> rabitq_centered_list;
+
+  // RaBitQ Refine (for IVF-RaBitQ refine two-stage)
+  // refine type: flat|sq8|sq4|fp16|bf16 (bf16 falls back to fp16 if
+  // unsupported)
+  std::string rbq_refine_type = "flat";
+  std::vector<std::string> rbq_refine_type_list;
+  int rbq_refine_k = 2;
+  std::vector<int> rbq_refine_k_list;
 
   // Output
   std::string out_csv = "hnsw_index_types_results.csv";
@@ -198,6 +207,8 @@ public:
     int qtype = -1;              // for SQ
     int rabitq_qb = 0;           // for RaBitQ
     int rabitq_centered = 0;     // 0/1 for printing
+    std::string refine_type;     // rbq_refine only
+    int refine_k = 0;            // rbq_refine only
 
     double train_time = 0.0;     // seconds
     double add_time = 0.0;       // seconds
@@ -443,8 +454,8 @@ public:
   }
 
   // HNSW-RaBitQ
-  TestResult testHNSWRaBitQ(
-      int hnsw_m, int efC, int efS, int qb, bool centered) {
+  TestResult testHNSWRaBitQ(int hnsw_m, int efC, int efS, int qb,
+                            bool centered) {
     std::cout << "  测试 IndexHNSWRaBitQ (M=" << hnsw_m << ", efC=" << efC
               << ", efS=" << efS << ", qb=" << qb
               << (centered ? ", centered" : "") << ")..." << std::endl;
@@ -480,8 +491,7 @@ public:
       std::vector<float> distances(nq * k);
       std::vector<faiss::idx_t> labels(nq * k);
       t0 = std::chrono::high_resolution_clock::now();
-      index.search(
-          nq, queries.data(), k, distances.data(), labels.data(), &sp);
+      index.search(nq, queries.data(), k, distances.data(), labels.data(), &sp);
       t1 = std::chrono::high_resolution_clock::now();
       r.search_time_ms =
           std::chrono::duration<double, std::milli>(t1 - t0).count() / nq;
@@ -695,14 +705,18 @@ public:
     r.rabitq_qb = qb;
     r.rabitq_centered = centered ? 1 : 0;
     try {
-      std::unique_ptr<faiss::IndexFlatL2> coarse = std::make_unique<faiss::IndexFlatL2>(dim);
-      std::unique_ptr<faiss::IndexIVFRaBitQ> index = std::make_unique<faiss::IndexIVFRaBitQ>(coarse.release(), dim, nlist, faiss::METRIC_L2);
+      std::unique_ptr<faiss::IndexFlatL2> coarse =
+          std::make_unique<faiss::IndexFlatL2>(dim);
+      std::unique_ptr<faiss::IndexIVFRaBitQ> index =
+          std::make_unique<faiss::IndexIVFRaBitQ>(coarse.release(), dim, nlist,
+                                                  faiss::METRIC_L2);
       index->nprobe = nprobe;
       index->own_fields = true;
       index->qb = (uint8_t)qb; // default query bits
 
       auto rr = std::make_unique<faiss::RandomRotationMatrix>(dim, dim);
-      auto idx_rr = std::make_unique<faiss::IndexPreTransform>(rr.release(), index.release());
+      auto idx_rr = std::make_unique<faiss::IndexPreTransform>(rr.release(),
+                                                               index.release());
       idx_rr->own_fields = true;
 
       auto t0 = std::chrono::high_resolution_clock::now();
@@ -725,7 +739,8 @@ public:
       sp.qb = (uint8_t)qb;
       sp.centered = centered;
       t0 = std::chrono::high_resolution_clock::now();
-      idx_rr->search(nq, queries.data(), k, distances.data(), labels.data(), &sp);
+      idx_rr->search(nq, queries.data(), k, distances.data(), labels.data(),
+                     &sp);
       t1 = std::chrono::high_resolution_clock::now();
       r.search_time_ms =
           std::chrono::duration<double, std::milli>(t1 - t0).count() / nq;
@@ -735,6 +750,125 @@ public:
       r.recall_10 = computeRecall(labels, ground_truth, k);
 
       r.mbs_on_disk = measureIndexSerializedSize(idx_rr.get());
+      if (nb > 0) {
+        double per_vec = (r.mbs_on_disk * 1024.0 * 1024.0) / nb;
+        r.compression_ratio = ((double)dim * 4.0) / per_vec;
+      } else {
+        r.compression_ratio = 0.0;
+      }
+    } catch (const std::exception &e) {
+      std::cerr << "    错误: " << e.what() << std::endl;
+      r.build_time = -1;
+    }
+    return r;
+  }
+
+  // IVF-RaBitQ + Refine (two-stage)
+  TestResult testIVFRaBitQRefine(int nlist, int nprobe, int qb, bool centered,
+                                 const std::string &refine_type, int refine_k) {
+    std::cout << "  测试 IVFRaBitQ+Refine (nlist=" << nlist
+              << ", nprobe=" << nprobe << ", qb=" << qb
+              << ", centered=" << (centered ? "true" : "false")
+              << ", refine_type=" << refine_type << ", refine_k=" << refine_k
+              << ")..." << std::endl;
+    TestResult r{};
+    r.method = "IVF-RaBitQ-Refine";
+    r.ivf_nlist = nlist;
+    r.ivf_nprobe = nprobe;
+    r.rabitq_qb = qb;
+    r.rabitq_centered = centered ? 1 : 0;
+    r.refine_type = refine_type;
+    r.refine_k = refine_k;
+    try {
+      // Base: RR -> IVFRaBitQ
+      std::unique_ptr<faiss::IndexFlatL2> coarse =
+          std::make_unique<faiss::IndexFlatL2>(dim);
+      std::unique_ptr<faiss::IndexIVFRaBitQ> base_ivf =
+          std::make_unique<faiss::IndexIVFRaBitQ>(coarse.release(), dim, nlist,
+                                                  faiss::METRIC_L2);
+      base_ivf->nprobe = nprobe;
+      base_ivf->own_fields = true;
+      base_ivf->qb = (uint8_t)qb; // default query bits
+
+      auto rr = std::make_unique<faiss::RandomRotationMatrix>(dim, dim);
+      std::unique_ptr<faiss::IndexPreTransform> base =
+          std::make_unique<faiss::IndexPreTransform>(rr.release(),
+                                                     base_ivf.release());
+      base->own_fields = true;
+
+      // Refine index by type (operates on original vectors)
+      std::unique_ptr<faiss::Index> refine;
+      auto to_lower = [](std::string s) {
+        std::transform(s.begin(), s.end(), s.begin(),
+                       [](unsigned char c) { return std::tolower(c); });
+        return s;
+      };
+      std::string rt = to_lower(refine_type);
+      if (rt == "flat") {
+        refine = std::make_unique<faiss::IndexFlatL2>(dim);
+      } else if (rt == "sq8") {
+        refine = std::make_unique<faiss::IndexScalarQuantizer>(
+            dim, faiss::ScalarQuantizer::QuantizerType::QT_8bit,
+            faiss::METRIC_L2);
+      } else if (rt == "sq4") {
+        refine = std::make_unique<faiss::IndexScalarQuantizer>(
+            dim, faiss::ScalarQuantizer::QuantizerType::QT_4bit,
+            faiss::METRIC_L2);
+      } else if (rt == "fp16" || rt == "bf16") {
+        // Use fp16 SQ as a proxy; if bf16 unsupported in this FAISS build, fall
+        // back to fp16
+        refine = std::make_unique<faiss::IndexScalarQuantizer>(
+            dim, faiss::ScalarQuantizer::QuantizerType::QT_fp16,
+            faiss::METRIC_L2);
+      } else {
+        std::cout << "    未知 refine_type='" << refine_type << "'，回退到 flat"
+                  << std::endl;
+        refine = std::make_unique<faiss::IndexFlatL2>(dim);
+      }
+
+      // Wrap with IndexRefine
+      std::unique_ptr<faiss::IndexRefine> wrapper =
+          std::make_unique<faiss::IndexRefine>(base.release(),
+                                               refine.release());
+      wrapper->own_fields = true;
+
+      // Train both indices as needed
+      auto t0 = std::chrono::high_resolution_clock::now();
+      wrapper->train(nb, database.data());
+      auto t1 = std::chrono::high_resolution_clock::now();
+      r.train_time = std::chrono::duration<double>(t1 - t0).count();
+      auto t2 = std::chrono::high_resolution_clock::now();
+      wrapper->add(nb, database.data());
+      auto t3 = std::chrono::high_resolution_clock::now();
+      r.add_time = std::chrono::duration<double>(t3 - t2).count();
+      r.build_time = r.train_time + r.add_time;
+      std::cout << std::fixed << std::setprecision(3)
+                << "    训练(train)= " << r.train_time
+                << " s, 建索引(add)= " << r.add_time
+                << " s, 总构建= " << r.build_time << " s" << std::endl;
+
+      // Search with two-stage params
+      std::vector<float> distances(nq * k);
+      std::vector<faiss::idx_t> labels(nq * k);
+      faiss::IVFRaBitQSearchParameters ivf_sp;
+      ivf_sp.qb = (uint8_t)qb;
+      ivf_sp.centered = centered;
+      // nprobe is already set on index; still pass via base params
+      faiss::IndexRefineSearchParameters ref_sp;
+      ref_sp.k_factor = refine_k;
+      ref_sp.base_index_params = &ivf_sp;
+      t0 = std::chrono::high_resolution_clock::now();
+      wrapper->search(nq, queries.data(), k, distances.data(), labels.data(),
+                      &ref_sp);
+      t1 = std::chrono::high_resolution_clock::now();
+      r.search_time_ms =
+          std::chrono::duration<double, std::milli>(t1 - t0).count() / nq;
+
+      r.recall_1 = computeRecall(labels, ground_truth, 1);
+      r.recall_5 = computeRecall(labels, ground_truth, 5);
+      r.recall_10 = computeRecall(labels, ground_truth, k);
+
+      r.mbs_on_disk = measureIndexSerializedSize(wrapper.get());
       if (nb > 0) {
         double per_vec = (r.mbs_on_disk * 1024.0 * 1024.0) / nb;
         r.compression_ratio = ((double)dim * 4.0) / per_vec;
@@ -804,9 +938,14 @@ public:
     auto ivf_nlist_list = prepareIntList(opt.ivf_nlist_list, opt.ivf_nlist);
     auto ivf_nprobe_list = prepareIntList(opt.ivf_nprobe_list, opt.ivf_nprobe);
     auto rabitq_qb_list = prepareIntList(opt.rabitq_qb_list, opt.rabitq_qb);
-  auto rabitq_centered_list =
-    prepareIntList(
-      opt.rabitq_centered_list, opt.rabitq_centered ? 1 : 0);
+    auto rabitq_centered_list =
+        prepareIntList(opt.rabitq_centered_list, opt.rabitq_centered ? 1 : 0);
+    auto rbq_refine_type_list =
+        (opt.rbq_refine_type_list.empty()
+             ? std::vector<std::string>{opt.rbq_refine_type}
+             : opt.rbq_refine_type_list);
+    auto rbq_refine_k_list =
+        prepareIntList(opt.rbq_refine_k_list, opt.rbq_refine_k);
 
     // Iterate over dataset-level combinations first: dim, nb, nq, k
     for (int dim_v : dim_list) {
@@ -865,8 +1004,8 @@ public:
                     for (int qb_v : rabitq_qb_list) {
                       for (int centered_flag : rabitq_centered_list) {
                         bool centered = centered_flag != 0;
-                        auto r = bench_local.testHNSWRaBitQ(
-                            hM, efC_v, efS_v, qb_v, centered);
+                        auto r = bench_local.testHNSWRaBitQ(hM, efC_v, efS_v,
+                                                            qb_v, centered);
                         if (r.build_time >= 0) {
                           r.dim = dim_v;
                           r.nb = nb_v;
@@ -923,18 +1062,41 @@ public:
                     }
                   }
                 }
-                if (contains("ivf_rabitq")) {
+                if (contains("ivf_rbq")) {
                   for (int qb_v : rabitq_qb_list) {
                     for (int centered_flag : rabitq_centered_list) {
                       bool centered = centered_flag != 0;
-                      auto r = bench_local.testIVFRaBitQ(
-                          nl_v, np_v, qb_v, centered);
+                      auto r =
+                          bench_local.testIVFRaBitQ(nl_v, np_v, qb_v, centered);
                       if (r.build_time >= 0) {
                         r.dim = dim_v;
                         r.nb = nb_v;
                         r.nq = nq_v;
                         r.k = k_v;
                         results.push_back(r);
+                      }
+                    }
+                  }
+                }
+                // IVFRaBitQ + Refine
+                if (contains("rbq_refine") || contains("ivf_rbq_refine")) {
+                  for (int qb_v : rabitq_qb_list) {
+                    for (int centered_flag : rabitq_centered_list) {
+                      bool centered = centered_flag != 0;
+                      for (const auto &rt : rbq_refine_type_list) {
+                        for (int rk : rbq_refine_k_list) {
+                          if (rk < 1)
+                            continue;
+                          auto r = bench_local.testIVFRaBitQRefine(
+                              nl_v, np_v, qb_v, centered, rt, rk);
+                          if (r.build_time >= 0) {
+                            r.dim = dim_v;
+                            r.nb = nb_v;
+                            r.nq = nq_v;
+                            r.k = k_v;
+                            results.push_back(r);
+                          }
+                        }
                       }
                     }
                   }
@@ -994,34 +1156,38 @@ public:
     // Detailed table
     std::cout << "\n📊 详细结果:" << std::endl;
     // Print header matching CSV columns and order
-    std::cout << std::left << std::setw(12) << "method" << std::setw(6) << "dim"
+    std::cout << std::left << std::setw(18) << "method" << std::setw(6) << "dim"
               << std::setw(8) << "nb" << std::setw(6) << "nq" << std::setw(4)
               << "k" << std::setw(8) << "hnsw_M" << std::setw(6) << "efC"
               << std::setw(6) << "efS" << std::setw(10) << "ivf_nlist"
               << std::setw(10) << "ivf_nprobe" << std::setw(6) << "pq_m"
-              << std::setw(10) << "pq_nbits" << std::setw(10) << "rabitq_qb"
-              << std::setw(16) << "rabitq_centered" << std::setw(18) << "qtype"
-              << std::setw(12) << "train_time" << std::setw(10) << "add_time"
-              << std::setw(12) << "build_time" << std::setw(14)
-              << "search_time_ms" << std::setw(12) << "recall_at_1"
-              << std::setw(12) << "recall_at_5" << std::setw(14)
-              << "recall_at_k" << std::setw(14) << "mbs_on_disk"
+              << std::setw(10) << "pq_nbits" << std::setw(10) << "rbq_qb"
+              << std::setw(16) << "rbq_centered" << std::setw(10)
+              << "refine_k" << std::setw(12) << "refine_type" << std::setw(18)
+              << "qtype" << std::setw(12) << "train_tm" << std::setw(10)
+              << "add_tm" << std::setw(12) << "build_tm" << std::setw(14)
+              << "search_tm_ms" << std::setw(12) << "r@1"
+              << std::setw(12) << "r@5" << std::setw(14)
+              << "r@k" << std::setw(14) << "mbs_on_disk"
               << std::setw(16) << "compression_ratio" << std::endl;
-    std::cout << std::string(12 + 6 + 8 + 6 + 4 + 8 + 6 + 6 + 10 + 10 + 6 + 10 +
-                                 10 + 16 + 18 + 12 + 10 + 12 + 14 + 12 + 12 +
-                                 14 + 14 + 16,
+    std::cout << std::string(18 + 6 + 8 + 6 + 4 + 8 + 6 + 6 + 10 + 10 + 6 + 10 +
+                                 10 + 16 + 10 + 12 + 18 + 12 + 10 + 12 + 14 +
+                                 12 + 12 + 14 + 14 + 16,
                              '-')
               << std::endl;
 
     for (const auto &r : results) {
-      std::cout << std::left << std::setw(12) << r.method << std::setw(6)
+      std::cout << std::left << std::setw(18) << r.method << std::setw(6)
                 << r.dim << std::setw(8) << r.nb << std::setw(6) << r.nq
                 << std::setw(4) << r.k << std::setw(8) << r.hnsw_M
                 << std::setw(6) << r.efC << std::setw(6) << r.efS
                 << std::setw(10) << r.ivf_nlist << std::setw(10) << r.ivf_nprobe
                 << std::setw(6) << r.pq_m << std::setw(10) << r.pq_nbits
                 << std::setw(10) << r.rabitq_qb << std::setw(16)
-                << r.rabitq_centered << std::setw(18)
+                << r.rabitq_centered << std::setw(10) << r.refine_k
+                << std::setw(12)
+                << (r.refine_type.empty() ? "NA" : r.refine_type)
+                << std::setw(18)
                 << ((r.method == std::string("HNSW-SQ") ||
                      r.method == std::string("IVF-SQ"))
                         ? PQBenchmark::qtypeName(r.qtype)
@@ -1055,7 +1221,8 @@ public:
     std::ofstream csv_file(path);
     if (csv_file.is_open()) {
       csv_file << "method,dim,nb,nq,k,hnsw_M,efC,efS,ivf_nlist,ivf_nprobe,pq_m,"
-                  "pq_nbits,rabitq_qb,rabitq_centered,qtype,train_"
+                  "pq_nbits,rabitq_qb,rabitq_centered,refine_k,refine_type,"
+                  "qtype,train_"
                   "time,add_time,build_time,search_time_ms,recall_at_1,"
                   "recall_at_5,recall_at_k,mbs_on_disk,compression_ratio\n";
       for (const auto &r : results) {
@@ -1063,7 +1230,9 @@ public:
                  << "," << r.k << "," << r.hnsw_M << "," << r.efC << ","
                  << r.efS << "," << r.ivf_nlist << "," << r.ivf_nprobe << ","
                  << r.pq_m << "," << r.pq_nbits << "," << r.rabitq_qb << ","
-                 << r.rabitq_centered << ","
+                 << r.rabitq_centered << "," << r.refine_k << ","
+                 << (r.refine_type.empty() ? std::string("NA") : r.refine_type)
+                 << ","
                  << ((r.method == std::string("HNSW-SQ") ||
                       r.method == std::string("IVF-SQ"))
                          ? qtypeName(r.qtype)
@@ -1154,6 +1323,15 @@ int main(int argc, char **argv) {
       if (i + 1 < argc)
         dst = argv[++i];
     };
+    auto handleListOrSingleString = [&](std::vector<std::string> &lst,
+                                        std::string &single) {
+      std::string s;
+      nexts(s);
+      if (s.find(',') != std::string::npos)
+        lst = splitCSV(s);
+      else if (!s.empty())
+        single = s;
+    };
     auto handleListOrSingleInt = [&](std::vector<int> &lst, int &single) {
       std::string s;
       nexts(s);
@@ -1233,8 +1411,8 @@ int main(int argc, char **argv) {
           if (lowered == "true" || lowered == "t" || lowered == "yes" ||
               lowered == "y") {
             opt.rabitq_centered = true;
-          } else if (lowered == "false" || lowered == "f" ||
-                     lowered == "no" || lowered == "n") {
+          } else if (lowered == "false" || lowered == "f" || lowered == "no" ||
+                     lowered == "n") {
             opt.rabitq_centered = false;
           }
         }
@@ -1242,6 +1420,10 @@ int main(int argc, char **argv) {
         // flag form defaults to true when no explicit value provided
         opt.rabitq_centered = true;
       }
+    } else if (a == "--rbq-refine-type") {
+      handleListOrSingleString(opt.rbq_refine_type_list, opt.rbq_refine_type);
+    } else if (a == "--rbq-refine-k") {
+      handleListOrSingleInt(opt.rbq_refine_k_list, opt.rbq_refine_k);
     } else if (a == "--which") {
       std::string s;
       nexts(s);
@@ -1278,8 +1460,13 @@ int main(int argc, char **argv) {
              "8)\n"
              "  --rabitq-centered 0|1[,0|1...] RaBitQ centered query flag "
              "(default 0)\n"
+             "  --rbq-refine-type STR[,STR...]  refine type for IVFRaBitQ "
+             "refine (flat|sq8|sq4|fp16|bf16) (default flat)\n"
+             "  --rbq-refine-k INT[,INT...]     refine k-factor (>=1), "
+             "multiplier of k for first-stage candidates (default 2)\n"
              "  --which STR                  comma list: "
-             "all|hnsw_flat|hnsw_sq|hnsw_pq|hnsw_rabitq|ivf_flat|ivf_sq|ivf_pq|ivf_rabitq "
+             "all|hnsw_flat|hnsw_sq|hnsw_pq|hnsw_rabitq|ivf_flat|ivf_sq|ivf_pq|"
+             "ivf_rbq|rbq_refine|ivf_rbq_refine "
              "(default all)\n"
              "  --out-csv PATH      output csv path (default "
              "hnsw_index_types_results.csv)\n"
