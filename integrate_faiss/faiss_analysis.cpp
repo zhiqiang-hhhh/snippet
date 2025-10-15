@@ -1,5 +1,6 @@
 #include "faiss/IndexPreTransform.h"
 #include "faiss/VectorTransform.h"
+#include "faiss/index_factory.h"
 #include <algorithm>
 #include <cctype>
 #include <chrono>
@@ -20,6 +21,7 @@
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <memory>
 #include <random>
 #include <sstream>
 #include <string>
@@ -706,22 +708,26 @@ public:
     r.rabitq_qb = qb;
     r.rabitq_centered = centered ? 1 : 0;
     try {
-      std::unique_ptr<faiss::IndexFlatL2> coarse =
-          std::make_unique<faiss::IndexFlatL2>(dim);
+      std::unique_ptr<faiss::IndexFlat> coarse =
+          std::make_unique<faiss::IndexFlat>(dim, faiss::METRIC_L2);
       std::unique_ptr<faiss::IndexIVFRaBitQ> index =
           std::make_unique<faiss::IndexIVFRaBitQ>(coarse.release(), dim, nlist,
                                                   faiss::METRIC_L2);
-      index->nprobe = nprobe;
       index->own_fields = true;
       index->qb = (uint8_t)qb; // default query bits
 
+      // Try both with and without rotation for better recall
       auto rr = std::make_unique<faiss::RandomRotationMatrix>(dim, dim);
+      // Align with bench_rabitq.py: explicit init of random rotation
+      rr->init(123);
       auto idx_rr = std::make_unique<faiss::IndexPreTransform>(rr.release(),
                                                                index.release());
       idx_rr->own_fields = true;
 
       auto t0 = std::chrono::high_resolution_clock::now();
-      idx_rr->train(nb, database.data());
+      // Use more training data if available for better quantization
+      int train_size = std::min(nb, std::max(50000, nb / 2));
+      idx_rr->train(train_size, database.data());
       auto t1 = std::chrono::high_resolution_clock::now();
       r.train_time = std::chrono::duration<double>(t1 - t0).count();
       auto t2 = std::chrono::high_resolution_clock::now();
@@ -732,19 +738,26 @@ public:
       std::cout << std::fixed << std::setprecision(3)
                 << "    训练(train)= " << r.train_time
                 << " s, 建索引(add)= " << r.add_time
-                << " s, 总构建= " << r.build_time << " s" << std::endl;
+                << " s, 总构建= " << r.build_time 
+                << " s, 训练样本=" << train_size << std::endl;
 
       std::vector<float> distances(nq * k);
       std::vector<faiss::idx_t> labels(nq * k);
       faiss::IVFRaBitQSearchParameters sp;
       sp.qb = (uint8_t)qb;
       sp.centered = centered;
+      // Important: when passing SearchParameters, nprobe from params is used.
+      // Default is 1, so make sure to pass the desired nprobe here.
+      sp.nprobe = nprobe;
       t0 = std::chrono::high_resolution_clock::now();
       idx_rr->search(nq, queries.data(), k, distances.data(), labels.data(),
                      &sp);
       t1 = std::chrono::high_resolution_clock::now();
       r.search_time_ms =
           std::chrono::duration<double, std::milli>(t1 - t0).count() / nq;
+
+      std::cout << "    调试: nprobe=" << sp.nprobe << ", qb=" << (int)sp.qb 
+                << ", centered=" << sp.centered << std::endl;
 
       r.recall_1 = computeRecall(labels, ground_truth, 1);
       r.recall_5 = computeRecall(labels, ground_truth, 5);
@@ -792,6 +805,7 @@ public:
       base_ivf->qb = (uint8_t)qb; // default query bits
 
       auto rr = std::make_unique<faiss::RandomRotationMatrix>(dim, dim);
+      rr->init(123);
       std::unique_ptr<faiss::IndexPreTransform> base =
           std::make_unique<faiss::IndexPreTransform>(rr.release(),
                                                      base_ivf.release());
@@ -854,6 +868,7 @@ public:
       faiss::IVFRaBitQSearchParameters ivf_sp;
       ivf_sp.qb = (uint8_t)qb;
       ivf_sp.centered = centered;
+      ivf_sp.nprobe = nprobe;
       // nprobe is already set on index; still pass via base params
       faiss::IndexRefineSearchParameters ref_sp;
       ref_sp.k_factor = refine_k;
@@ -1228,52 +1243,73 @@ public:
 
     // Detailed table
     std::cout << "\n📊 详细结果:" << std::endl;
-    // Print header matching CSV columns and order
-    std::cout << std::left << std::setw(18) << "method" << std::setw(6) << "dim"
-              << std::setw(8) << "nb" << std::setw(6) << "nq" << std::setw(4)
-              << "k" << std::setw(8) << "hnsw_M" << std::setw(6) << "efC"
-              << std::setw(6) << "efS" << std::setw(10) << "ivf_nlist"
-              << std::setw(10) << "ivf_nprobe" << std::setw(6) << "pq_m"
-              << std::setw(10) << "pq_nbits" << std::setw(10) << "rbq_qb"
-              << std::setw(16) << "rbq_centered" << std::setw(10) << "refine_k"
-              << std::setw(12) << "refine_type" << std::setw(18) << "qtype"
-              << std::setw(12) << "train_tm" << std::setw(10) << "add_tm"
-              << std::setw(12) << "build_tm" << std::setw(14) << "search_tm_ms"
-              << std::setw(12) << "r@1" << std::setw(12) << "r@5"
-              << std::setw(14) << "r@k" << std::setw(14) << "mbs_on_disk"
-              << std::setw(16) << "compression_ratio" << std::endl;
-    std::cout << std::string(18 + 6 + 8 + 6 + 4 + 8 + 6 + 6 + 10 + 10 + 6 + 10 +
-                                 10 + 16 + 10 + 12 + 18 + 12 + 10 + 12 + 14 +
-                                 12 + 12 + 14 + 14 + 16,
-                             '-')
-              << std::endl;
-
-    for (const auto &r : results) {
-      std::cout << std::left << std::setw(18) << r.method << std::setw(6)
-                << r.dim << std::setw(8) << r.nb << std::setw(6) << r.nq
-                << std::setw(4) << r.k << std::setw(8) << r.hnsw_M
-                << std::setw(6) << r.efC << std::setw(6) << r.efS
-                << std::setw(10) << r.ivf_nlist << std::setw(10) << r.ivf_nprobe
-                << std::setw(6) << r.pq_m << std::setw(10) << r.pq_nbits
-                << std::setw(10) << r.rabitq_qb << std::setw(16)
-                << r.rabitq_centered << std::setw(10) << r.refine_k
-                << std::setw(12)
-                << (r.refine_type.empty() ? "NA" : r.refine_type)
-                << std::setw(18)
+    // Print header matching CSV columns and order (space after each column)
+    std::cout << std::left
+              << std::setw(18) << "method" << ' '
+              << std::setw(6) << "dim" << ' '
+              << std::setw(8) << "nb" << ' '
+              << std::setw(6) << "nq" << ' '
+              << std::setw(4) << "k" << ' '
+              << std::setw(8) << "hnsw_M" << ' '
+              << std::setw(6) << "efC" << ' '
+              << std::setw(6) << "efS" << ' '
+              << std::setw(10) << "ivf_nlist" << ' '
+              << std::setw(10) << "ivf_nprobe" << ' '
+              << std::setw(6) << "pq_m" << ' '
+              << std::setw(10) << "pq_nbits" << ' '
+              << std::setw(10) << "rbq_qb" << ' '
+              << std::setw(12) << "rbq_centered" << ' '
+              << std::setw(10) << "refine_k" << ' '
+              << std::setw(12) << "refine_type" << ' '
+              << std::setw(10) << "qtype" << ' '
+              << std::setw(12) << "train_tm" << ' '
+              << std::setw(10) << "add_tm" << ' '
+              << std::setw(12) << "build_tm" << ' '
+              << std::setw(14) << "search_tm_ms" << ' '
+              << std::setw(10) << "r@1" << ' '
+              << std::setw(10) << "r@5" << ' '
+              << std::setw(10) << "r@k" << ' '
+              << std::setw(14) << "mbs_on_disk" << ' '
+              << std::setw(13) << "compression" << std::endl;
+    // Separator line length: sum of widths + spaces between columns (26 columns total)
+    std::cout << std::string(
+                     (18 + 6 + 8 + 6 + 4 + 8 + 6 + 6 + 10 + 10 + 6 + 10 + 10 +
+                      12 + 10 + 12 + 10 + 12 + 10 + 12 + 14 + 10 + 10 + 10 +
+                      14 + 13) + 25,
+                     '-')
+              << std::endl;    for (const auto &r : results) {
+      std::cout << std::left
+                << std::setw(18) << r.method << ' '
+                << std::setw(6) << r.dim << ' '
+                << std::setw(8) << r.nb << ' '
+                << std::setw(6) << r.nq << ' '
+                << std::setw(4) << r.k << ' '
+                << std::setw(8) << r.hnsw_M << ' '
+                << std::setw(6) << r.efC << ' '
+                << std::setw(6) << r.efS << ' '
+                << std::setw(10) << r.ivf_nlist << ' '
+                << std::setw(10) << r.ivf_nprobe << ' '
+                << std::setw(6) << r.pq_m << ' '
+                << std::setw(10) << r.pq_nbits << ' '
+                << std::setw(10) << r.rabitq_qb << ' '
+                << std::setw(12) << r.rabitq_centered << ' '
+                << std::setw(10) << r.refine_k << ' '
+                << std::setw(12) << (r.refine_type.empty() ? "NA" : r.refine_type) << ' '
+                << std::setw(10)
                 << ((r.method == std::string("HNSW-SQ") ||
                      r.method == std::string("IVF-SQ"))
                         ? PQBenchmark::qtypeName(r.qtype)
                         : "NA")
-                << std::setw(12) << std::fixed << std::setprecision(2)
-                << r.train_time << std::setw(10) << std::fixed
-                << std::setprecision(2) << r.add_time << std::setw(12)
-                << std::fixed << std::setprecision(2) << r.build_time
+                << ' ' << std::setw(12) << std::fixed << std::setprecision(2)
+                << r.train_time << ' ' << std::setw(10) << std::fixed
+                << std::setprecision(2) << r.add_time << ' ' << std::setw(12)
+                << std::fixed << std::setprecision(2) << r.build_time << ' '
                 << std::setw(14) << std::fixed << std::setprecision(2)
-                << r.search_time_ms << std::setw(12) << std::fixed
-                << std::setprecision(3) << r.recall_1 << std::setw(12)
-                << std::fixed << std::setprecision(3) << r.recall_5
-                << std::setw(14) << std::fixed << std::setprecision(3)
-                << r.recall_10 << std::setw(14) << std::fixed
+                << r.search_time_ms << ' ' << std::setw(10) << std::fixed
+                << std::setprecision(3) << r.recall_1 << ' ' << std::setw(10)
+                << std::fixed << std::setprecision(3) << r.recall_5 << ' '
+                << std::setw(10) << std::fixed << std::setprecision(3)
+                << r.recall_10 << ' ' << std::setw(14) << std::fixed
                 << std::setprecision(1) << r.mbs_on_disk;
       // compression ratio: not applicable for HNSW-Flat
       {
@@ -1283,7 +1319,7 @@ public:
         } else {
           cr << std::fixed << std::setprecision(1) << r.compression_ratio;
         }
-        std::cout << std::setw(16) << cr.str() << std::endl;
+        std::cout << ' ' << std::setw(13) << cr.str() << std::endl;
       }
     }
   }
