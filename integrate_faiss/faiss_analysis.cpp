@@ -83,12 +83,12 @@ struct Options {
   std::vector<int> pq_nbits_list;
   std::vector<double> pq_train_ratio_list; // allow multiple training ratios
 
-  // SQ (for HNSW-SQ)
-  int sq_qtype = (int)faiss::ScalarQuantizer::QuantizerType::QT_8bit;
-  std::vector<int> sq_qtype_list;
+  // SQ (for HNSW-SQ) - removed, now specified in which parameter
+  // int sq_qtype = (int)faiss::ScalarQuantizer::QuantizerType::QT_8bit;
+  // std::vector<int> sq_qtype_list;
 
-  // Which tests to run: all, hnsw_flat, hnsw_sq, hnsw_pq, hnsw_rabitq,
-  // ivf_flat, ivf_sq, ivf_pq, ivf_rbq, rabitq
+  // Which tests to run: all, hnsw_flat, hnsw_sq4, hnsw_sq8, hnsw_pq, hnsw_rabitq,
+  // ivf_flat, ivf_sq4, ivf_sq8, ivf_pq, ivf_rbq, rabitq
   std::vector<std::string> which = {"all"};
 
   // IVF parameters (for IVF-Flat / IVF-PQ / IVF-SQ)
@@ -113,6 +113,8 @@ struct Options {
 
   // Output
   std::string out_csv = "hnsw_index_types_results.csv";
+  std::string save_data_dir = ""; // if not empty, save test data to this directory
+  std::string load_data_dir = ""; // if not empty, load test data from this directory
 
   // Whether to build transposed centroids for PQ (optimization)
   bool transpose_centroid = false;
@@ -129,16 +131,34 @@ private:
   std::vector<float> database;
   std::vector<float> queries;
   std::vector<faiss::idx_t> ground_truth;
+  std::string save_data_dir; // directory to save test data
 
 public:
   PQBenchmark(int dim = 128, int nb = 20000, int nq = 500, int k = 10,
-              bool transpose_centroid = false)
-      : dim(dim), nb(nb), nq(nq), k(k), transpose_centroid(transpose_centroid) {
+              bool transpose_centroid = false, const std::string& data_dir = "",
+              const std::string& load_dir = "")
+      : dim(dim), nb(nb), nq(nq), k(k), transpose_centroid(transpose_centroid), save_data_dir(data_dir) {
     std::cout << "=== HNSW Index Types Benchmark (C++) ===" << std::endl;
     std::cout << "配置: dim=" << dim << ", nb=" << nb << ", nq=" << nq
               << ", k=" << k << std::endl;
-    generateData();
-    computeGroundTruth();
+    
+    if (!load_dir.empty()) {
+      std::cout << "从 " << load_dir << " 加载测试数据..." << std::endl;
+      if (loadTestData(load_dir)) {
+        std::cout << "数据加载成功!" << std::endl;
+      } else {
+        std::cout << "数据加载失败，生成新数据..." << std::endl;
+        generateData();
+        computeGroundTruth();
+      }
+    } else {
+      generateData();
+      computeGroundTruth();
+    }
+    
+    if (!save_data_dir.empty()) {
+      saveTestData();
+    }
   }
 
   void generateData() {
@@ -192,6 +212,167 @@ public:
     index.search(nq, queries.data(), k, distances.data(), ground_truth.data());
   }
 
+  void saveTestData() {
+    if (save_data_dir.empty()) return;
+    
+    // Create directory if it doesn't exist
+    std::string mkdir_cmd = "mkdir -p " + save_data_dir;
+    if (system(mkdir_cmd.c_str()) != 0) {
+      std::cerr << "警告: 无法创建目录 " << save_data_dir << std::endl;
+      return;
+    }
+    
+    std::cout << "保存测试数据到 " << save_data_dir << "..." << std::endl;
+    
+    // Save database vectors
+    std::string db_file = save_data_dir + "/database_" + std::to_string(dim) + "d_" + std::to_string(nb) + "n.fvecs";
+    saveFVecs(db_file, database, nb, dim);
+    
+    // Save query vectors  
+    std::string query_file = save_data_dir + "/queries_" + std::to_string(dim) + "d_" + std::to_string(nq) + "n.fvecs";
+    saveFVecs(query_file, queries, nq, dim);
+    
+    // Save ground truth
+    std::string gt_file = save_data_dir + "/groundtruth_" + std::to_string(nq) + "q_" + std::to_string(k) + "k.ivecs";
+    saveIVecs(gt_file, ground_truth, nq, k);
+    
+    std::cout << "数据已保存: " << db_file << ", " << query_file << ", " << gt_file << std::endl;
+  }
+
+  void saveFVecs(const std::string& filename, const std::vector<float>& data, int n, int d) {
+    std::ofstream file(filename, std::ios::binary);
+    if (!file.is_open()) {
+      std::cerr << "错误: 无法创建文件 " << filename << std::endl;
+      return;
+    }
+    
+    for (int i = 0; i < n; i++) {
+      file.write(reinterpret_cast<const char*>(&d), sizeof(int));
+      file.write(reinterpret_cast<const char*>(data.data() + i * d), d * sizeof(float));
+    }
+    file.close();
+  }
+
+  void saveIVecs(const std::string& filename, const std::vector<faiss::idx_t>& data, int n, int d) {
+    std::ofstream file(filename, std::ios::binary);
+    if (!file.is_open()) {
+      std::cerr << "错误: 无法创建文件 " << filename << std::endl;
+      return;
+    }
+    
+    for (int i = 0; i < n; i++) {
+      file.write(reinterpret_cast<const char*>(&d), sizeof(int));
+      for (int j = 0; j < d; j++) {
+        int val = static_cast<int>(data[i * d + j]);
+        file.write(reinterpret_cast<const char*>(&val), sizeof(int));
+      }
+    }
+    file.close();
+  }
+
+  bool loadTestData(const std::string& load_dir) {
+    try {
+      // 构建文件路径
+      std::string db_file = load_dir + "/database_" + std::to_string(dim) + "d_" + std::to_string(nb) + "n.fvecs";
+      std::string query_file = load_dir + "/queries_" + std::to_string(dim) + "d_" + std::to_string(nq) + "n.fvecs";
+      std::string gt_file = load_dir + "/groundtruth_" + std::to_string(nq) + "q_" + std::to_string(k) + "k.ivecs";
+      
+      // 检查文件是否存在
+      if (!fileExists(db_file) || !fileExists(query_file) || !fileExists(gt_file)) {
+        std::cout << "部分文件不存在，需要的文件:" << std::endl;
+        std::cout << "  " << db_file << std::endl;
+        std::cout << "  " << query_file << std::endl; 
+        std::cout << "  " << gt_file << std::endl;
+        return false;
+      }
+      
+      // 加载数据
+      if (!loadFVecs(db_file, database, nb, dim)) {
+        std::cerr << "加载数据库向量失败: " << db_file << std::endl;
+        return false;
+      }
+      
+      if (!loadFVecs(query_file, queries, nq, dim)) {
+        std::cerr << "加载查询向量失败: " << query_file << std::endl;
+        return false;
+      }
+      
+      if (!loadIVecs(gt_file, ground_truth, nq, k)) {
+        std::cerr << "加载ground truth失败: " << gt_file << std::endl;
+        return false;
+      }
+      
+      std::cout << "成功加载: " << nb << " 个数据库向量, " << nq << " 个查询向量, ground truth" << std::endl;
+      return true;
+    } catch (const std::exception& e) {
+      std::cerr << "加载数据时发生异常: " << e.what() << std::endl;
+      return false;
+    }
+  }
+
+  bool fileExists(const std::string& filename) {
+    std::ifstream file(filename);
+    return file.good();
+  }
+
+  bool loadFVecs(const std::string& filename, std::vector<float>& data, int expected_n, int expected_d) {
+    std::ifstream file(filename, std::ios::binary);
+    if (!file.is_open()) {
+      return false;
+    }
+    
+    data.resize(expected_n * expected_d);
+    
+    for (int i = 0; i < expected_n; i++) {
+      int d;
+      file.read(reinterpret_cast<char*>(&d), sizeof(int));
+      if (file.fail() || d != expected_d) {
+        std::cerr << "维度不匹配: 期望 " << expected_d << ", 实际 " << d << " (在向量 " << i << ")" << std::endl;
+        return false;
+      }
+      
+      file.read(reinterpret_cast<char*>(data.data() + i * expected_d), expected_d * sizeof(float));
+      if (file.fail()) {
+        std::cerr << "读取向量数据失败: 向量 " << i << std::endl;
+        return false;
+      }
+    }
+    
+    file.close();
+    return true;
+  }
+
+  bool loadIVecs(const std::string& filename, std::vector<faiss::idx_t>& data, int expected_n, int expected_d) {
+    std::ifstream file(filename, std::ios::binary);
+    if (!file.is_open()) {
+      return false;
+    }
+    
+    data.resize(expected_n * expected_d);
+    
+    for (int i = 0; i < expected_n; i++) {
+      int d;
+      file.read(reinterpret_cast<char*>(&d), sizeof(int));
+      if (file.fail() || d != expected_d) {
+        std::cerr << "k值不匹配: 期望 " << expected_d << ", 实际 " << d << " (在查询 " << i << ")" << std::endl;
+        return false;
+      }
+      
+      for (int j = 0; j < expected_d; j++) {
+        int val;
+        file.read(reinterpret_cast<char*>(&val), sizeof(int));
+        if (file.fail()) {
+          std::cerr << "读取ground truth失败: 查询 " << i << ", 位置 " << j << std::endl;
+          return false;
+        }
+        data[i * expected_d + j] = static_cast<faiss::idx_t>(val);
+      }
+    }
+    
+    file.close();
+    return true;
+  }
+
   struct TestResult {
     std::string method; // HNSW-Flat / HNSW-SQ / HNSW-PQ
     // Dataset level
@@ -242,6 +423,25 @@ public:
 #endif
     default:
       return "unknown";
+    }
+  }
+
+  // 小工具：获取qtype对应的bit数
+  static int getQTypeBits(int qtype) {
+    using QT = faiss::ScalarQuantizer::QuantizerType;
+    switch (qtype) {
+    case QT::QT_8bit:
+    case QT::QT_8bit_uniform:
+#ifdef FAISS_HAVE_QT_8BIT_DIRECT
+    case QT::QT_8bit_direct:
+#endif
+      return 8;
+    case QT::QT_4bit:
+      return 4;
+    case QT::QT_fp16:
+      return 16;
+    default:
+      return 8;
     }
   }
 
@@ -302,10 +502,11 @@ public:
 
   // HNSW-SQ
   TestResult testHNSWSQ(int qtype, int hnsw_m, int efC, int efS) {
-    std::cout << "  测试 IndexHNSWSQ (" << qtypeName(qtype) << ", M=" << hnsw_m
+    std::string qtype_name = qtypeName(qtype);
+    std::cout << "  测试 IndexHNSWSQ (" << qtype_name << ", M=" << hnsw_m
               << ", efC=" << efC << ", efS=" << efS << ")..." << std::endl;
     TestResult r{};
-    r.method = "HNSW-SQ";
+    r.method = "HNSW-SQ" + std::to_string(getQTypeBits(qtype));
     r.hnsw_M = hnsw_m;
     r.efC = efC;
     r.efS = efS;
@@ -641,11 +842,12 @@ public:
 
   // IVF-SQ
   TestResult testIVFSQ(int nlist, int nprobe, int qtype) {
-    std::cout << "  测试 IndexIVFScalarQuantizer (" << qtypeName(qtype)
+    std::string qtype_name = qtypeName(qtype);
+    std::cout << "  测试 IndexIVFScalarQuantizer (" << qtype_name
               << ", nlist=" << nlist << ", nprobe=" << nprobe << ")..."
               << std::endl;
     TestResult r{};
-    r.method = "IVF-SQ";
+    r.method = "IVF-SQ" + std::to_string(getQTypeBits(qtype));
     r.ivf_nlist = nlist;
     r.ivf_nprobe = nprobe;
     r.qtype = qtype;
@@ -987,6 +1189,24 @@ public:
              opt.which.end();
     };
 
+    // Helper to check for SQ variants
+    auto containsSQ = [&](const std::string &base, int bits) {
+      std::string target = base + std::to_string(bits);
+      return contains(target);
+    };
+
+    // Parse SQ types from which parameter
+    auto getSQTypes = [&](const std::string &base) {
+      std::vector<int> types;
+      if (contains("all") || containsSQ(base, 4)) {
+        types.push_back((int)faiss::ScalarQuantizer::QuantizerType::QT_4bit);
+      }
+      if (contains("all") || containsSQ(base, 8)) {
+        types.push_back((int)faiss::ScalarQuantizer::QuantizerType::QT_8bit);
+      }
+      return types;
+    };
+
     // Prepare lists (fallback to single value if list empty)
     auto prepareIntList = [](const std::vector<int> &lst, int single) {
       return lst.empty() ? std::vector<int>{single} : lst;
@@ -1006,7 +1226,7 @@ public:
     auto pq_nbits_list = prepareIntList(opt.pq_nbits_list, opt.pq_nbits);
     auto pq_train_ratio_list =
         prepareDoubleList(opt.pq_train_ratio_list, opt.pq_train_ratio);
-    auto sq_qtype_list = prepareIntList(opt.sq_qtype_list, opt.sq_qtype);
+    // auto sq_qtype_list = prepareIntList(opt.sq_qtype_list, opt.sq_qtype); // removed
     auto ivf_nlist_list = prepareIntList(opt.ivf_nlist_list, opt.ivf_nlist);
     auto ivf_nprobe_list = prepareIntList(opt.ivf_nprobe_list, opt.ivf_nprobe);
     auto rabitq_qb_list = prepareIntList(opt.rabitq_qb_list, opt.rabitq_qb);
@@ -1026,7 +1246,7 @@ public:
           for (int k_v : k_list) {
             // Rebuild benchmark data for each dataset combo
             PQBenchmark bench_local(dim_v, nb_v, nq_v, k_v,
-                                    opt.transpose_centroid);
+                                    opt.transpose_centroid, opt.save_data_dir, opt.load_data_dir);
             // HNSW param combos
             for (int hM : hnsw_M_list) {
               for (int efC_v : efC_list) {
@@ -1041,17 +1261,16 @@ public:
                       results.push_back(r);
                     }
                   }
-                  if (contains("hnsw_sq")) {
-                    for (int qtype_v : sq_qtype_list) {
-                      auto r =
-                          bench_local.testHNSWSQ(qtype_v, hM, efC_v, efS_v);
-                      if (r.build_time >= 0) {
-                        r.dim = dim_v;
-                        r.nb = nb_v;
-                        r.nq = nq_v;
-                        r.k = k_v;
-                        results.push_back(r);
-                      }
+                  // HNSW-SQ with specific bit types
+                  auto hnsw_sq_types = getSQTypes("hnsw_sq");
+                  for (int qtype_v : hnsw_sq_types) {
+                    auto r = bench_local.testHNSWSQ(qtype_v, hM, efC_v, efS_v);
+                    if (r.build_time >= 0) {
+                      r.dim = dim_v;
+                      r.nb = nb_v;
+                      r.nq = nq_v;
+                      r.k = k_v;
+                      results.push_back(r);
                     }
                   }
                   if (contains("hnsw_pq")) {
@@ -1104,16 +1323,16 @@ public:
                     results.push_back(r);
                   }
                 }
-                if (contains("ivf_sq")) {
-                  for (int qtype_v : sq_qtype_list) {
-                    auto r = bench_local.testIVFSQ(nl_v, np_v, qtype_v);
-                    if (r.build_time >= 0) {
-                      r.dim = dim_v;
-                      r.nb = nb_v;
-                      r.nq = nq_v;
-                      r.k = k_v;
-                      results.push_back(r);
-                    }
+                // IVF-SQ with specific bit types
+                auto ivf_sq_types = getSQTypes("ivf_sq");
+                for (int qtype_v : ivf_sq_types) {
+                  auto r = bench_local.testIVFSQ(nl_v, np_v, qtype_v);
+                  if (r.build_time >= 0) {
+                    r.dim = dim_v;
+                    r.nb = nb_v;
+                    r.nq = nq_v;
+                    r.k = k_v;
+                    results.push_back(r);
                   }
                 }
                 if (contains("ivf_pq")) {
@@ -1485,16 +1704,16 @@ int main(int argc, char **argv) {
         if (opt.pq_train_ratio > 1.0)
           opt.pq_train_ratio = 1.0;
       }
-    } else if (a == "--sq-qtype") {
-      std::string s;
-      nexts(s);
-      if (s.find(',') != std::string::npos) {
-        auto parts = splitCSV(s);
-        for (auto &p : parts)
-          opt.sq_qtype_list.push_back(parseQType(p));
-      } else {
-        opt.sq_qtype = parseQType(s);
-      }
+    // } else if (a == "--sq-qtype") {  // removed - now specified in --which
+    //   std::string s;
+    //   nexts(s);
+    //   if (s.find(',') != std::string::npos) {
+    //     auto parts = splitCSV(s);
+    //     for (auto &p : parts)
+    //       opt.sq_qtype_list.push_back(parseQType(p));
+    //   } else {
+    //     opt.sq_qtype = parseQType(s);
+    //   }
     } else if (a == "--ivf-nlist") {
       handleListOrSingleInt(opt.ivf_nlist_list, opt.ivf_nlist);
     } else if (a == "--ivf-nprobe") {
@@ -1538,6 +1757,10 @@ int main(int argc, char **argv) {
       opt.which = splitCSV(s);
     } else if (a == "--out-csv")
       nexts(opt.out_csv);
+    else if (a == "--save-data-dir")
+      nexts(opt.save_data_dir);
+    else if (a == "--load-data-dir")
+      nexts(opt.load_data_dir);
     else if (a == "--transpose-centroid") {
       opt.transpose_centroid = true;
     } else if (a == "--no-transpose-centroid") {
@@ -1560,8 +1783,6 @@ int main(int argc, char **argv) {
              "(default 8)\n"
              "  --pq-train-ratio F[,F...]    PQ train ratio list in [0,1] "
              "(default 1.0)\n"
-             "  --sq-qtype STR[,STR...]      SQ qtype list "
-             "(QT_8bit|QT_4bit|QT_8bit_uniform|QT_fp16)\n"
              "  --ivf-nlist INT[,INT...]     IVF nlist list (default 256)\n"
              "  --ivf-nprobe INT[,INT...]    IVF nprobe list (default 8)\n"
              "  --rabitq-qb INT[,INT...]     RaBitQ qb bits for query (default "
@@ -1573,11 +1794,15 @@ int main(int argc, char **argv) {
              "  --rbq-refine-k INT[,INT...]     refine k-factor (>=1), "
              "multiplier of k for first-stage candidates (default 2)\n"
              "  --which STR                  comma list: "
-             "all|hnsw_flat|hnsw_sq|hnsw_pq|hnsw_rabitq|ivf_flat|ivf_sq|ivf_pq|"
+             "all|hnsw_flat|hnsw_sq4|hnsw_sq8|hnsw_pq|hnsw_rabitq|ivf_flat|ivf_sq4|ivf_sq8|ivf_pq|"
              "ivf_rbq|rbq_refine|ivf_rbq_refine|rabitq "
              "(default all)\n"
              "  --out-csv PATH      output csv path (default "
              "hnsw_index_types_results.csv)\n"
+             "  --save-data-dir PATH         save test data (database, queries, groundtruth) "
+             "to specified directory\n"
+             "  --load-data-dir PATH         load test data from specified directory "
+             "(if files exist, skips generation)\n"
              "  --transpose-centroid         enable PQ transposed centroids "
              "(default off)\n"
              "  --no-transpose-centroid      disable PQ transposed centroids "
@@ -1587,7 +1812,7 @@ int main(int argc, char **argv) {
   }
 
   try {
-    PQBenchmark bench(opt.dim, opt.nb, opt.nq, opt.k, opt.transpose_centroid);
+    PQBenchmark bench(opt.dim, opt.nb, opt.nq, opt.k, opt.transpose_centroid, opt.save_data_dir, opt.load_data_dir);
     auto results = bench.runIndexTypeBenchmarks(opt);
     bench.printAnalysis(results);
     bench.saveResults(results, opt.out_csv);
