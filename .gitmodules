@@ -7,3 +7,6 @@
 [submodule "hnsw-visual"]
 	path = contrib/hnsw-illustrated
 	url = https://github.com/stefanwebb/hnsw-illustrated.git
+[submodule "openssl"]
+	path = contrib/openssl
+	url = https://github.com/openssl/openssl.git

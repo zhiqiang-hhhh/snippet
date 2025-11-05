@@ -1,5 +1,5 @@
 .cache
-build
+build*
 __pycache__
 *.db
 search/data/*
