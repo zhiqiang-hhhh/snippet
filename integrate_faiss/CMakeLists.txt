@@ -59,3 +59,28 @@ target_link_libraries(sq PRIVATE faiss)
 
 add_executable(faiss_analysis faiss_analysis.cpp)
 target_link_libraries(faiss_analysis PRIVATE faiss)
+
+# VecML (Fluffy) support: optional C shim to avoid C++ ABI conflicts
+option(VECML_LIB_PATH "Path to VecML SDK dir containing fluffy_interface.h and libfluffy_shared_lib.so" "")
+option(VECML_USE_OLD_CXX_ABI "Build vecml_shim with the old libstdc++ ABI to match VecML SDK" ON)
+
+if(VECML_LIB_PATH)
+	set(VECML_INCLUDE_DIR "${VECML_LIB_PATH}" CACHE PATH "VecML include dir")
+	set(FLUFFY_LIBRARY "${VECML_LIB_PATH}/libfluffy_shared_lib.so" CACHE FILEPATH "VecML shared lib")
+	set(CPR_LIBRARY "${VECML_LIB_PATH}/libcpr.so.1" CACHE FILEPATH "libcpr dependency for VecML")
+endif()
+
+if(VECML_INCLUDE_DIR AND FLUFFY_LIBRARY AND CPR_LIBRARY)
+	message(STATUS "VecML detected: include=${VECML_INCLUDE_DIR}, fluffy=${FLUFFY_LIBRARY}, cpr=${CPR_LIBRARY}")
+	add_library(vecml_shim SHARED vecml_shim/vecml_shim.cpp)
+	target_include_directories(vecml_shim PRIVATE ${VECML_INCLUDE_DIR} ${PROJECT_SOURCE_DIR}/integrate_faiss)
+	target_link_libraries(vecml_shim PRIVATE ${FLUFFY_LIBRARY} ${CPR_LIBRARY})
+	if(VECML_USE_OLD_CXX_ABI)
+		target_compile_definitions(vecml_shim PRIVATE _GLIBCXX_USE_CXX11_ABI=0)
+	endif()
+	# expose HAVE_VECML to faiss_analysis compilation
+	target_compile_definitions(faiss_analysis PRIVATE HAVE_VECML=1)
+	target_link_libraries(faiss_analysis PRIVATE vecml_shim)
+else()
+	message(STATUS "VecML not detected for faiss_analysis; build faiss_analysis without VecML support or set -DVECML_LIB_PATH to help detection.")
+endif()

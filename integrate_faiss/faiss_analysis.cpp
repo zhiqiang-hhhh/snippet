@@ -29,6 +29,9 @@
 #include <unistd.h>
 #include <unordered_set>
 #include <vector>
+#ifdef HAVE_VECML
+#include "vecml_shim/vecml_shim.h"
+#endif
 
 // 通过序列化来估算索引内存占用：写到临时文件，取文件大小（MB）
 static double measureIndexSerializedSize(faiss::Index *index) {
@@ -115,6 +118,10 @@ struct Options {
   std::string out_csv = "hnsw_index_types_results.csv";
   std::string save_data_dir = ""; // if not empty, save test data to this directory
   std::string load_data_dir = ""; // if not empty, load test data from this directory
+
+  // VecML options
+  std::string vecml_base_path = ""; // path to vecml SDK dir (contains include/lib)
+  std::string vecml_license_path = "license.txt";
 
   // Whether to build transposed centroids for PQ (optimization)
   bool transpose_centroid = false;
@@ -1156,6 +1163,76 @@ public:
     return r;
   }
 
+#ifdef HAVE_VECML
+  // VecML test using the C shim (vecml_shim)
+  TestResult testVecML(const std::string &base_path, const std::string &license_path) {
+    TestResult r{};
+    r.method = "VecML";
+    r.dim = dim;
+    r.nb = nb;
+    r.nq = nq;
+    r.k = k;
+    // create ctx
+    vecml_ctx_t ctx = vecml_create(base_path.c_str(), license_path.c_str());
+    if (!ctx) {
+      std::cerr << "VecML: failed to create context" << std::endl;
+      r.build_time = -1;
+      return r;
+    }
+    // VecML does not have a separate train phase. Measure add_time and set
+    // build_time = add_time to reflect that "build" is just adding data.
+    try {
+      auto t_add0 = std::chrono::high_resolution_clock::now();
+      int add_ret = vecml_add_data(ctx, database.data(), nb, dim, nullptr);
+      auto t_add1 = std::chrono::high_resolution_clock::now();
+      if (add_ret != 0) {
+        std::cerr << "VecML: add_data failed: " << add_ret << std::endl;
+        vecml_destroy(ctx);
+        r.build_time = -1;
+        return r;
+      }
+      r.add_time = std::chrono::duration<double>(t_add1 - t_add0).count();
+      r.train_time = 0.0; // no train step in VecML
+      r.build_time = r.add_time;
+
+      // Search timing
+      std::vector<long> out_ids((size_t)nq * k, -1);
+      auto t_s0 = std::chrono::high_resolution_clock::now();
+      int sret = vecml_search(ctx, queries.data(), nq, dim, k, out_ids.data());
+      auto t_s1 = std::chrono::high_resolution_clock::now();
+      if (sret != 0) {
+        std::cerr << "VecML: search failed: " << sret << std::endl;
+        vecml_destroy(ctx);
+        r.build_time = -1;
+        return r;
+      }
+      double search_sec = std::chrono::duration<double>(t_s1 - t_s0).count();
+      if (nq > 0)
+        r.search_time_ms = (search_sec / (double)nq) * 1000.0;
+      else
+        r.search_time_ms = 0.0;
+
+      // convert to faiss labels
+      std::vector<faiss::idx_t> labels((size_t)nq * k);
+      for (int i = 0; i < nq * k; ++i) {
+        labels[i] = out_ids[i] >= 0 ? static_cast<faiss::idx_t>(out_ids[i]) : -1;
+      }
+      r.recall_1 = computeRecall(labels, ground_truth, 1);
+      r.recall_5 = computeRecall(labels, ground_truth, 5);
+      r.recall_10 = computeRecall(labels, ground_truth, k);
+
+      vecml_destroy(ctx);
+      return r;
+    } catch (const std::exception &e) {
+      std::cerr << "VecML: exception during add/search: " << e.what() << std::endl;
+      vecml_destroy(ctx);
+      r.build_time = -1;
+      return r;
+    }
+    
+  }
+#endif
+
   double computeRecall(const std::vector<faiss::idx_t> &pred_labels,
                        const std::vector<faiss::idx_t> &true_labels,
                        int top_k) {
@@ -1765,10 +1842,14 @@ int main(int argc, char **argv) {
       opt.transpose_centroid = true;
     } else if (a == "--no-transpose-centroid") {
       opt.transpose_centroid = false; // explicit disable
+    } else if (a == "--vecml-base-path") {
+      nexts(opt.vecml_base_path);
+    } else if (a == "--vecml-license") {
+      nexts(opt.vecml_license_path);
     } else if (a == "-h" || a == "--help") {
-      std::cout
-          << "Usage: ./bench [options]\n"
-             "  --dim INT[,INT...]           vector dim list (default 128)\n"
+    std::cout
+      << "Usage: ./bench [options]\n"
+       "  --dim INT[,INT...]           vector dim list (default 128)\n"
              "  --nb INT[,INT...]            database size list (default "
              "20000)\n"
              "  --nq INT[,INT...]            queries count list (default 500)\n"
@@ -1806,7 +1887,9 @@ int main(int argc, char **argv) {
              "  --transpose-centroid         enable PQ transposed centroids "
              "(default off)\n"
              "  --no-transpose-centroid      disable PQ transposed centroids "
-             "(override)\n";
+             "(override)\n"
+             "  --vecml-base-path PATH         path to VecML SDK directory (contains lib and headers)\n"
+             "  --vecml-license PATH           path to VecML license file (optional, default: license.txt)\n";
       return 0;
     }
   }
@@ -1814,6 +1897,35 @@ int main(int argc, char **argv) {
   try {
     PQBenchmark bench(opt.dim, opt.nb, opt.nq, opt.k, opt.transpose_centroid, opt.save_data_dir, opt.load_data_dir);
     auto results = bench.runIndexTypeBenchmarks(opt);
+
+    // If VecML is requested (either via --which=vecml or by providing a
+    // --vecml-base-path) run the VecML test using the C shim. This keeps the
+    // command-line simple: either add "vecml" to --which or provide
+    // --vecml-base-path.
+    bool want_vecml = false;
+    for (const auto &w : opt.which) {
+      if (w == "vecml") {
+        want_vecml = true;
+        break;
+      }
+    }
+    if (!opt.vecml_base_path.empty()) {
+      want_vecml = true;
+    }
+#ifdef HAVE_VECML
+    if (want_vecml) {
+      auto vr = bench.testVecML(opt.vecml_base_path, opt.vecml_license_path);
+      if (vr.build_time >= 0) {
+        results.push_back(vr);
+      } else {
+        std::cerr << "VecML test failed (see messages above)" << std::endl;
+      }
+    }
+#else
+    if (want_vecml) {
+      std::cerr << "VecML support not compiled in (HAVE_VECML not defined)." << std::endl;
+    }
+#endif
     bench.printAnalysis(results);
     bench.saveResults(results, opt.out_csv);
     std::cout << "\n✅ 分析完成！" << std::endl;
