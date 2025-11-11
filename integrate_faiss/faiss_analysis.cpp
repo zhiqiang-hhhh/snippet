@@ -29,6 +29,7 @@
 #include <string>
 #include <thread>
 #include <utility>
+#include <filesystem>
 #include <sys/stat.h>
 #include <unistd.h>
 #include <unordered_set>
@@ -60,6 +61,35 @@ static double measureIndexSerializedSize(faiss::Index *index) {
     ::unlink(tmpl);
     return 0.0;
   }
+}
+
+static double computeDirectorySizeMB(const std::string &path) {
+  if (path.empty()) {
+    return -1.0;
+  }
+  std::error_code ec;
+  std::filesystem::path dir(path);
+  if (!std::filesystem::exists(dir, ec)) {
+    return 0.0;
+  }
+  std::uintmax_t total_blocks = 0;
+  for (auto it = std::filesystem::recursive_directory_iterator(
+           dir, std::filesystem::directory_options::skip_permission_denied, ec);
+       it != std::filesystem::recursive_directory_iterator(); it.increment(ec)) {
+    if (ec) {
+      continue;
+    }
+    const auto &entry = *it;
+    if (!entry.is_regular_file(ec)) {
+      continue;
+    }
+    struct stat st;
+    if (::stat(entry.path().c_str(), &st) == 0) {
+      total_blocks += static_cast<std::uintmax_t>(st.st_blocks);
+    }
+  }
+  double bytes = static_cast<double>(total_blocks) * 512.0; // POSIX reports blocks in 512-byte units
+  return bytes / (1024.0 * 1024.0);
 }
 
 struct Options {
@@ -1214,9 +1244,8 @@ public:
       r.build_time = r.add_time;
 
       // Get file size after adding data
-      double disk_mb = vecml_get_disk_mb(ctx);
-      std::cerr << "vecml_add_data: total disk usage after add: " << disk_mb << " MB\n";
-      r.mbs_on_disk = disk_mb;
+  double disk_mb = vecml_get_disk_mb(ctx);
+  std::cerr << "vecml_add_data: total disk usage after add: " << disk_mb << " MB\n";
 
       // Search timing
       std::vector<long> out_ids((size_t)nq * k, -1);
@@ -1333,6 +1362,17 @@ public:
       }
 
       vecml_destroy(ctx);
+
+  double final_disk_mb = computeDirectorySizeMB(base_path);
+      if (final_disk_mb >= 0.0) {
+        r.mbs_on_disk = final_disk_mb;
+        double raw_mb = (double)nb * (double)dim * sizeof(float) / (1024.0 * 1024.0);
+        if (final_disk_mb > 0.0) {
+          r.compression_ratio = raw_mb / final_disk_mb;
+        }
+        std::cerr << "vecml_destroy: persisted disk usage: " << final_disk_mb << " MB\n";
+      }
+
       return r;
     } catch (const std::exception &e) {
       std::cerr << "VecML: exception during add/search: " << e.what() << std::endl;
