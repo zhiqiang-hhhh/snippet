@@ -3,7 +3,6 @@
 #include "faiss/index_factory.h"
 #include <algorithm>
 #include <atomic>
-#include <optional>
 #include <cctype>
 #include <chrono>
 #include <cmath>
@@ -20,19 +19,20 @@
 #include <faiss/IndexScalarQuantizer.h>
 #include <faiss/MetricType.h>
 #include <faiss/index_io.h>
+#include <filesystem>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
 #include <memory>
+#include <optional>
 #include <random>
 #include <sstream>
 #include <string>
-#include <thread>
-#include <utility>
-#include <filesystem>
 #include <sys/stat.h>
+#include <thread>
 #include <unistd.h>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 #ifdef HAVE_VECML
 #include "vecml_shim/vecml_shim.h"
@@ -75,7 +75,8 @@ static double computeDirectorySizeMB(const std::string &path) {
   std::uintmax_t total_blocks = 0;
   for (auto it = std::filesystem::recursive_directory_iterator(
            dir, std::filesystem::directory_options::skip_permission_denied, ec);
-       it != std::filesystem::recursive_directory_iterator(); it.increment(ec)) {
+       it != std::filesystem::recursive_directory_iterator();
+       it.increment(ec)) {
     if (ec) {
       continue;
     }
@@ -88,7 +89,8 @@ static double computeDirectorySizeMB(const std::string &path) {
       total_blocks += static_cast<std::uintmax_t>(st.st_blocks);
     }
   }
-  double bytes = static_cast<double>(total_blocks) * 512.0; // POSIX reports blocks in 512-byte units
+  double bytes = static_cast<double>(total_blocks) *
+                 512.0; // POSIX reports blocks in 512-byte units
   return bytes / (1024.0 * 1024.0);
 }
 
@@ -124,8 +126,8 @@ struct Options {
   // int sq_qtype = (int)faiss::ScalarQuantizer::QuantizerType::QT_8bit;
   // std::vector<int> sq_qtype_list;
 
-  // Which tests to run: all, hnsw_flat, hnsw_sq4, hnsw_sq8, hnsw_pq, hnsw_rabitq,
-  // ivf_flat, ivf_sq4, ivf_sq8, ivf_pq, ivf_rbq, rabitq
+  // Which tests to run: all, hnsw_flat, hnsw_sq4, hnsw_sq8, hnsw_pq,
+  // hnsw_rabitq, ivf_flat, ivf_sq4, ivf_sq8, ivf_pq, ivf_rbq, rabitq
   std::vector<std::string> which = {"all"};
 
   // IVF parameters (for IVF-Flat / IVF-PQ / IVF-SQ)
@@ -150,16 +152,20 @@ struct Options {
 
   // Output
   std::string out_csv = "hnsw_index_types_results.csv";
-  std::string save_data_dir = ""; // if not empty, save test data to this directory
-  std::string load_data_dir = ""; // if not empty, load test data from this directory
+  std::string save_data_dir =
+      ""; // if not empty, save test data to this directory
+  std::string load_data_dir =
+      ""; // if not empty, load test data from this directory
 
   // Multi-thread smoke test options
-  int mt_threads = 0;       // 0 for auto-detect
-  bool run_mt_test = true;  // allow disabling the smoke test
-  bool verify_mt = true;    // compare multi-thread results against sequential baseline
+  int mt_threads = 0;      // 0 for auto-detect
+  bool run_mt_test = true; // allow disabling the smoke test
+  bool verify_mt =
+      true; // compare multi-thread results against sequential baseline
 
   // VecML options
-  std::string vecml_base_path = ""; // path to vecml SDK dir (contains include/lib)
+  std::string vecml_base_path =
+      ""; // path to vecml SDK dir (contains include/lib)
   std::string vecml_license_path = "license.txt";
 
   // Whether to build transposed centroids for PQ (optimization)
@@ -181,13 +187,14 @@ private:
 
 public:
   PQBenchmark(int dim = 128, int nb = 20000, int nq = 500, int k = 10,
-              bool transpose_centroid = false, const std::string& data_dir = "",
-              const std::string& load_dir = "")
-      : dim(dim), nb(nb), nq(nq), k(k), transpose_centroid(transpose_centroid), save_data_dir(data_dir) {
+              bool transpose_centroid = false, const std::string &data_dir = "",
+              const std::string &load_dir = "")
+      : dim(dim), nb(nb), nq(nq), k(k), transpose_centroid(transpose_centroid),
+        save_data_dir(data_dir) {
     std::cout << "=== HNSW Index Types Benchmark (C++) ===" << std::endl;
     std::cout << "配置: dim=" << dim << ", nb=" << nb << ", nq=" << nq
               << ", k=" << k << std::endl;
-    
+
     if (!load_dir.empty()) {
       std::cout << "从 " << load_dir << " 加载测试数据..." << std::endl;
       if (loadTestData(load_dir)) {
@@ -201,7 +208,7 @@ public:
       generateData();
       computeGroundTruth();
     }
-    
+
     if (!save_data_dir.empty()) {
       saveTestData();
     }
@@ -259,162 +266,181 @@ public:
   }
 
   void saveTestData() {
-    if (save_data_dir.empty()) return;
-    
+    if (save_data_dir.empty())
+      return;
+
     // Create directory if it doesn't exist
     std::string mkdir_cmd = "mkdir -p " + save_data_dir;
     if (system(mkdir_cmd.c_str()) != 0) {
       std::cerr << "警告: 无法创建目录 " << save_data_dir << std::endl;
       return;
     }
-    
+
     std::cout << "保存测试数据到 " << save_data_dir << "..." << std::endl;
-    
+
     // Save database vectors
-    std::string db_file = save_data_dir + "/database_" + std::to_string(dim) + "d_" + std::to_string(nb) + "n.fvecs";
+    std::string db_file = save_data_dir + "/database_" + std::to_string(dim) +
+                          "d_" + std::to_string(nb) + "n.fvecs";
     saveFVecs(db_file, database, nb, dim);
-    
-    // Save query vectors  
-    std::string query_file = save_data_dir + "/queries_" + std::to_string(dim) + "d_" + std::to_string(nq) + "n.fvecs";
+
+    // Save query vectors
+    std::string query_file = save_data_dir + "/queries_" + std::to_string(dim) +
+                             "d_" + std::to_string(nq) + "n.fvecs";
     saveFVecs(query_file, queries, nq, dim);
-    
+
     // Save ground truth
-    std::string gt_file = save_data_dir + "/groundtruth_" + std::to_string(nq) + "q_" + std::to_string(k) + "k.ivecs";
+    std::string gt_file = save_data_dir + "/groundtruth_" + std::to_string(nq) +
+                          "q_" + std::to_string(k) + "k.ivecs";
     saveIVecs(gt_file, ground_truth, nq, k);
-    
-    std::cout << "数据已保存: " << db_file << ", " << query_file << ", " << gt_file << std::endl;
+
+    std::cout << "数据已保存: " << db_file << ", " << query_file << ", "
+              << gt_file << std::endl;
   }
 
-  void saveFVecs(const std::string& filename, const std::vector<float>& data, int n, int d) {
+  void saveFVecs(const std::string &filename, const std::vector<float> &data,
+                 int n, int d) {
     std::ofstream file(filename, std::ios::binary);
     if (!file.is_open()) {
       std::cerr << "错误: 无法创建文件 " << filename << std::endl;
       return;
     }
-    
+
     for (int i = 0; i < n; i++) {
-      file.write(reinterpret_cast<const char*>(&d), sizeof(int));
-      file.write(reinterpret_cast<const char*>(data.data() + i * d), d * sizeof(float));
+      file.write(reinterpret_cast<const char *>(&d), sizeof(int));
+      file.write(reinterpret_cast<const char *>(data.data() + i * d),
+                 d * sizeof(float));
     }
     file.close();
   }
 
-  void saveIVecs(const std::string& filename, const std::vector<faiss::idx_t>& data, int n, int d) {
+  void saveIVecs(const std::string &filename,
+                 const std::vector<faiss::idx_t> &data, int n, int d) {
     std::ofstream file(filename, std::ios::binary);
     if (!file.is_open()) {
       std::cerr << "错误: 无法创建文件 " << filename << std::endl;
       return;
     }
-    
+
     for (int i = 0; i < n; i++) {
-      file.write(reinterpret_cast<const char*>(&d), sizeof(int));
+      file.write(reinterpret_cast<const char *>(&d), sizeof(int));
       for (int j = 0; j < d; j++) {
         int val = static_cast<int>(data[i * d + j]);
-        file.write(reinterpret_cast<const char*>(&val), sizeof(int));
+        file.write(reinterpret_cast<const char *>(&val), sizeof(int));
       }
     }
     file.close();
   }
 
-  bool loadTestData(const std::string& load_dir) {
+  bool loadTestData(const std::string &load_dir) {
     try {
       // 构建文件路径
-      std::string db_file = load_dir + "/database_" + std::to_string(dim) + "d_" + std::to_string(nb) + "n.fvecs";
-      std::string query_file = load_dir + "/queries_" + std::to_string(dim) + "d_" + std::to_string(nq) + "n.fvecs";
-      std::string gt_file = load_dir + "/groundtruth_" + std::to_string(nq) + "q_" + std::to_string(k) + "k.ivecs";
-      
+      std::string db_file = load_dir + "/database_" + std::to_string(dim) +
+                            "d_" + std::to_string(nb) + "n.fvecs";
+      std::string query_file = load_dir + "/queries_" + std::to_string(dim) +
+                               "d_" + std::to_string(nq) + "n.fvecs";
+      std::string gt_file = load_dir + "/groundtruth_" + std::to_string(nq) +
+                            "q_" + std::to_string(k) + "k.ivecs";
+
       // 检查文件是否存在
-      if (!fileExists(db_file) || !fileExists(query_file) || !fileExists(gt_file)) {
+      if (!fileExists(db_file) || !fileExists(query_file) ||
+          !fileExists(gt_file)) {
         std::cout << "部分文件不存在，需要的文件:" << std::endl;
         std::cout << "  " << db_file << std::endl;
-        std::cout << "  " << query_file << std::endl; 
+        std::cout << "  " << query_file << std::endl;
         std::cout << "  " << gt_file << std::endl;
         return false;
       }
-      
+
       // 加载数据
       if (!loadFVecs(db_file, database, nb, dim)) {
         std::cerr << "加载数据库向量失败: " << db_file << std::endl;
         return false;
       }
-      
+
       if (!loadFVecs(query_file, queries, nq, dim)) {
         std::cerr << "加载查询向量失败: " << query_file << std::endl;
         return false;
       }
-      
+
       if (!loadIVecs(gt_file, ground_truth, nq, k)) {
         std::cerr << "加载ground truth失败: " << gt_file << std::endl;
         return false;
       }
-      
-      std::cout << "成功加载: " << nb << " 个数据库向量, " << nq << " 个查询向量, ground truth" << std::endl;
+
+      std::cout << "成功加载: " << nb << " 个数据库向量, " << nq
+                << " 个查询向量, ground truth" << std::endl;
       return true;
-    } catch (const std::exception& e) {
+    } catch (const std::exception &e) {
       std::cerr << "加载数据时发生异常: " << e.what() << std::endl;
       return false;
     }
   }
 
-  bool fileExists(const std::string& filename) {
+  bool fileExists(const std::string &filename) {
     std::ifstream file(filename);
     return file.good();
   }
 
-  bool loadFVecs(const std::string& filename, std::vector<float>& data, int expected_n, int expected_d) {
+  bool loadFVecs(const std::string &filename, std::vector<float> &data,
+                 int expected_n, int expected_d) {
     std::ifstream file(filename, std::ios::binary);
     if (!file.is_open()) {
       return false;
     }
-    
+
     data.resize(expected_n * expected_d);
-    
+
     for (int i = 0; i < expected_n; i++) {
       int d;
-      file.read(reinterpret_cast<char*>(&d), sizeof(int));
+      file.read(reinterpret_cast<char *>(&d), sizeof(int));
       if (file.fail() || d != expected_d) {
-        std::cerr << "维度不匹配: 期望 " << expected_d << ", 实际 " << d << " (在向量 " << i << ")" << std::endl;
+        std::cerr << "维度不匹配: 期望 " << expected_d << ", 实际 " << d
+                  << " (在向量 " << i << ")" << std::endl;
         return false;
       }
-      
-      file.read(reinterpret_cast<char*>(data.data() + i * expected_d), expected_d * sizeof(float));
+
+      file.read(reinterpret_cast<char *>(data.data() + i * expected_d),
+                expected_d * sizeof(float));
       if (file.fail()) {
         std::cerr << "读取向量数据失败: 向量 " << i << std::endl;
         return false;
       }
     }
-    
+
     file.close();
     return true;
   }
 
-  bool loadIVecs(const std::string& filename, std::vector<faiss::idx_t>& data, int expected_n, int expected_d) {
+  bool loadIVecs(const std::string &filename, std::vector<faiss::idx_t> &data,
+                 int expected_n, int expected_d) {
     std::ifstream file(filename, std::ios::binary);
     if (!file.is_open()) {
       return false;
     }
-    
+
     data.resize(expected_n * expected_d);
-    
+
     for (int i = 0; i < expected_n; i++) {
       int d;
-      file.read(reinterpret_cast<char*>(&d), sizeof(int));
+      file.read(reinterpret_cast<char *>(&d), sizeof(int));
       if (file.fail() || d != expected_d) {
-        std::cerr << "k值不匹配: 期望 " << expected_d << ", 实际 " << d << " (在查询 " << i << ")" << std::endl;
+        std::cerr << "k值不匹配: 期望 " << expected_d << ", 实际 " << d
+                  << " (在查询 " << i << ")" << std::endl;
         return false;
       }
-      
+
       for (int j = 0; j < expected_d; j++) {
         int val;
-        file.read(reinterpret_cast<char*>(&val), sizeof(int));
+        file.read(reinterpret_cast<char *>(&val), sizeof(int));
         if (file.fail()) {
-          std::cerr << "读取ground truth失败: 查询 " << i << ", 位置 " << j << std::endl;
+          std::cerr << "读取ground truth失败: 查询 " << i << ", 位置 " << j
+                    << std::endl;
           return false;
         }
         data[i * expected_d + j] = static_cast<faiss::idx_t>(val);
       }
     }
-    
+
     file.close();
     return true;
   }
@@ -451,12 +477,12 @@ public:
     double compression_ratio = 0.0;
 
     // Multi-thread smoke metrics (optional)
-  bool has_mt = false;
-  int mt_threads = 0;
-  double mt_search_time_ms = 0.0;
-  double mt_recall_k = 0.0;
-  double mt_recall_1 = 0.0;
-  double mt_recall_5 = 0.0;
+    bool has_mt = false;
+    int mt_threads = 0;
+    double mt_search_time_ms = 0.0;
+    double mt_recall_k = 0.0;
+    double mt_recall_1 = 0.0;
+    double mt_recall_5 = 0.0;
   };
 
   // 小工具：qtype 名称
@@ -994,7 +1020,7 @@ public:
       std::cout << std::fixed << std::setprecision(3)
                 << "    训练(train)= " << r.train_time
                 << " s, 建索引(add)= " << r.add_time
-                << " s, 总构建= " << r.build_time 
+                << " s, 总构建= " << r.build_time
                 << " s, 训练样本=" << train_size << std::endl;
 
       std::vector<float> distances(nq * k);
@@ -1012,7 +1038,7 @@ public:
       r.search_time_ms =
           std::chrono::duration<double, std::milli>(t1 - t0).count() / nq;
 
-      std::cout << "    调试: nprobe=" << sp.nprobe << ", qb=" << (int)sp.qb 
+      std::cout << "    调试: nprobe=" << sp.nprobe << ", qb=" << (int)sp.qb
                 << ", centered=" << sp.centered << std::endl;
 
       r.recall_1 = computeRecall(labels, ground_truth, 1);
@@ -1212,8 +1238,9 @@ public:
 
 #ifdef HAVE_VECML
   // VecML test using the C shim (vecml_shim)
-  TestResult testVecML(const std::string &base_path, const std::string &license_path,
-                       int mt_threads_option, bool enable_mt_test, bool verify_mt) {
+  TestResult testVecML(const std::string &base_path,
+                       const std::string &license_path, int mt_threads_option,
+                       bool enable_mt_test, bool verify_mt) {
     TestResult r{};
     r.method = "VecML";
     r.dim = dim;
@@ -1244,8 +1271,9 @@ public:
       r.build_time = r.add_time;
 
       // Get file size after adding data
-  double disk_mb = vecml_get_disk_mb(ctx);
-  std::cerr << "vecml_add_data: total disk usage after add: " << disk_mb << " MB\n";
+      double disk_mb = vecml_get_disk_mb(ctx);
+      std::cerr << "vecml_add_data: total disk usage after add: " << disk_mb
+                << " MB\n";
 
       // Search timing
       std::vector<long> out_ids((size_t)nq * k, -1);
@@ -1267,33 +1295,38 @@ public:
       // convert to faiss labels
       std::vector<faiss::idx_t> labels((size_t)nq * k);
       for (int i = 0; i < nq * k; ++i) {
-        labels[i] = out_ids[i] >= 0 ? static_cast<faiss::idx_t>(out_ids[i]) : -1;
+        labels[i] =
+            out_ids[i] >= 0 ? static_cast<faiss::idx_t>(out_ids[i]) : -1;
       }
       r.recall_1 = computeRecall(labels, ground_truth, 1);
       r.recall_5 = computeRecall(labels, ground_truth, 5);
       r.recall_k = computeRecall(labels, ground_truth, k);
 
       if (enable_mt_test) {
-        int threads = mt_threads_option > 0 ? mt_threads_option
-                                            : static_cast<int>(std::thread::hardware_concurrency());
+        int threads =
+            mt_threads_option > 0
+                ? mt_threads_option
+                : static_cast<int>(std::thread::hardware_concurrency());
         if (threads <= 1) {
-          std::cout << "\n[VecML-MT] Skip multi-thread test: threads<=1" << std::endl;
+          std::cout << "\n[VecML-MT] Skip multi-thread test: threads<=1"
+                    << std::endl;
         } else if (nq <= 0 || k <= 0) {
-          std::cout << "\n[VecML-MT] Skip multi-thread test: invalid dataset configuration" << std::endl;
+          std::cout << "\n[VecML-MT] Skip multi-thread test: invalid dataset "
+                       "configuration"
+                    << std::endl;
         } else {
-          std::cout << "\n=== VecML Multi-thread Smoke Test (threads=" << threads << ") ===" << std::endl;
+          std::cout << "\n=== VecML Multi-thread Smoke Test (threads="
+                    << threads << ") ===" << std::endl;
           std::vector<long> mt_out((size_t)nq * k, -1);
           std::atomic<int> mt_err{0};
           auto run_chunk = [&](std::size_t start, std::size_t count) {
             if (count == 0 || mt_err.load(std::memory_order_relaxed) != 0) {
               return;
             }
-            int ret = vecml_search(ctx,
-                                   queries.data() + start * (std::size_t)dim,
-                                   static_cast<int>(count),
-                                   dim,
-                                   k,
-                                   mt_out.data() + start * (std::size_t)k);
+            int ret =
+                vecml_search(ctx, queries.data() + start * (std::size_t)dim,
+                             static_cast<int>(count), dim, k,
+                             mt_out.data() + start * (std::size_t)k);
             if (ret != 0) {
               mt_err.store(ret, std::memory_order_relaxed);
             }
@@ -1307,12 +1340,14 @@ public:
           std::size_t cursor = 0;
           auto mt_t0 = std::chrono::high_resolution_clock::now();
           for (int t = 0; t < threads; ++t) {
-            std::size_t count = base_chunk + ((std::size_t)t < remainder ? 1 : 0);
+            std::size_t count =
+                base_chunk + ((std::size_t)t < remainder ? 1 : 0);
             if (count == 0) {
               continue;
             }
             std::size_t start = cursor;
-            workers.emplace_back([&, start, count]() { run_chunk(start, count); });
+            workers.emplace_back(
+                [&, start, count]() { run_chunk(start, count); });
             cursor += count;
           }
           for (auto &worker : workers) {
@@ -1322,18 +1357,23 @@ public:
 
           int mt_code = mt_err.load(std::memory_order_relaxed);
           if (mt_code != 0) {
-            std::cout << "[VecML-MT] vecml_search returned error code " << mt_code
-                      << "; skipping multi-thread metrics" << std::endl;
+            std::cout << "[VecML-MT] vecml_search returned error code "
+                      << mt_code << "; skipping multi-thread metrics"
+                      << std::endl;
           } else {
-            double mt_total_ms = std::chrono::duration<double, std::milli>(mt_t1 - mt_t0).count();
+            double mt_total_ms =
+                std::chrono::duration<double, std::milli>(mt_t1 - mt_t0)
+                    .count();
             double mt_ms_per_query = nq > 0 ? mt_total_ms / (double)nq : 0.0;
 
             std::vector<faiss::idx_t> mt_labels((size_t)nq * k);
             for (int i = 0; i < nq * k; ++i) {
-              mt_labels[i] = mt_out[i] >= 0 ? static_cast<faiss::idx_t>(mt_out[i]) : -1;
+              mt_labels[i] =
+                  mt_out[i] >= 0 ? static_cast<faiss::idx_t>(mt_out[i]) : -1;
             }
             double mt_recall_1 = computeRecall(mt_labels, ground_truth, 1);
-            double mt_recall_5 = computeRecall(mt_labels, ground_truth, std::min(5, k));
+            double mt_recall_5 =
+                computeRecall(mt_labels, ground_truth, std::min(5, k));
             double mt_recall_k = computeRecall(mt_labels, ground_truth, k);
             bool match = true;
             if (verify_mt) {
@@ -1341,10 +1381,12 @@ public:
             }
 
             std::cout << std::fixed << std::setprecision(3)
-                      << "Sequential : " << r.search_time_ms << " ms/query, recall@" << k
-                      << "=" << r.recall_k << std::endl;
-            std::cout << "Multi-thread: " << mt_ms_per_query << " ms/query, recall@" << k
-                      << "=" << mt_recall_k << std::endl;
+                      << "Sequential : " << r.search_time_ms
+                      << " ms/query, recall@" << k << "=" << r.recall_k
+                      << std::endl;
+            std::cout << "Multi-thread: " << mt_ms_per_query
+                      << " ms/query, recall@" << k << "=" << mt_recall_k
+                      << std::endl;
             r.has_mt = true;
             r.mt_threads = threads;
             r.mt_search_time_ms = mt_ms_per_query;
@@ -1352,9 +1394,12 @@ public:
             r.mt_recall_1 = mt_recall_1;
             r.mt_recall_5 = mt_recall_5;
             if (verify_mt) {
-              std::cout << "Verification: " << (match ? "PASS" : "FAIL") << std::endl;
+              std::cout << "Verification: " << (match ? "PASS" : "FAIL")
+                        << std::endl;
               if (!match) {
-                std::cout << "[WARN] VecML multi-thread results differ from single-thread baseline" << std::endl;
+                std::cout << "[WARN] VecML multi-thread results differ from "
+                             "single-thread baseline"
+                          << std::endl;
               }
             }
           }
@@ -1363,24 +1408,26 @@ public:
 
       vecml_destroy(ctx);
 
-  double final_disk_mb = computeDirectorySizeMB(base_path);
+      double final_disk_mb = computeDirectorySizeMB(base_path);
       if (final_disk_mb >= 0.0) {
         r.mbs_on_disk = final_disk_mb;
-        double raw_mb = (double)nb * (double)dim * sizeof(float) / (1024.0 * 1024.0);
+        double raw_mb =
+            (double)nb * (double)dim * sizeof(float) / (1024.0 * 1024.0);
         if (final_disk_mb > 0.0) {
           r.compression_ratio = raw_mb / final_disk_mb;
         }
-        std::cerr << "vecml_destroy: persisted disk usage: " << final_disk_mb << " MB\n";
+        std::cerr << "vecml_destroy: persisted disk usage: " << final_disk_mb
+                  << " MB\n";
       }
 
       return r;
     } catch (const std::exception &e) {
-      std::cerr << "VecML: exception during add/search: " << e.what() << std::endl;
+      std::cerr << "VecML: exception during add/search: " << e.what()
+                << std::endl;
       vecml_destroy(ctx);
       r.build_time = -1;
       return r;
     }
-    
   }
 #endif
 
@@ -1454,7 +1501,8 @@ public:
     auto pq_nbits_list = prepareIntList(opt.pq_nbits_list, opt.pq_nbits);
     auto pq_train_ratio_list =
         prepareDoubleList(opt.pq_train_ratio_list, opt.pq_train_ratio);
-    // auto sq_qtype_list = prepareIntList(opt.sq_qtype_list, opt.sq_qtype); // removed
+    // auto sq_qtype_list = prepareIntList(opt.sq_qtype_list, opt.sq_qtype); //
+    // removed
     auto ivf_nlist_list = prepareIntList(opt.ivf_nlist_list, opt.ivf_nlist);
     auto ivf_nprobe_list = prepareIntList(opt.ivf_nprobe_list, opt.ivf_nprobe);
     auto rabitq_qb_list = prepareIntList(opt.rabitq_qb_list, opt.rabitq_qb);
@@ -1474,7 +1522,8 @@ public:
           for (int k_v : k_list) {
             // Rebuild benchmark data for each dataset combo
             PQBenchmark bench_local(dim_v, nb_v, nq_v, k_v,
-                                    opt.transpose_centroid, opt.save_data_dir, opt.load_data_dir);
+                                    opt.transpose_centroid, opt.save_data_dir,
+                                    opt.load_data_dir);
             // HNSW param combos
             for (int hM : hnsw_M_list) {
               for (int efC_v : efC_list) {
@@ -1700,37 +1749,25 @@ public:
     }
 
     std::ostringstream header;
-    header << std::left
-           << std::setw(18) << "method" << ' '
-           << std::setw(6) << "dim" << ' '
-           << std::setw(8) << "nb" << ' '
-           << std::setw(6) << "nq" << ' '
-           << std::setw(4) << "k" << ' '
-           << std::setw(8) << "hnsw_M" << ' '
-           << std::setw(6) << "efC" << ' '
-           << std::setw(6) << "efS" << ' '
-           << std::setw(10) << "ivf_nlist" << ' '
-           << std::setw(10) << "ivf_nprobe" << ' '
-           << std::setw(6) << "pq_m" << ' '
-           << std::setw(10) << "pq_nbits" << ' '
-           << std::setw(10) << "rbq_qb" << ' '
-           << std::setw(12) << "rbq_centered" << ' '
-           << std::setw(10) << "refine_k" << ' '
-           << std::setw(12) << "refine_type" << ' '
-           << std::setw(10) << "qtype" << ' '
-           << std::setw(12) << "train_tm" << ' '
-           << std::setw(10) << "add_tm" << ' '
-           << std::setw(12) << "build_tm" << ' '
-           << std::setw(14) << "search_tm_ms" << ' '
-           << std::setw(10) << "r@1" << ' '
-           << std::setw(10) << "r@5" << ' '
-           << std::setw(10) << "r@k" << ' '
-           << std::setw(14) << "mbs_on_disk" << ' '
-           << std::setw(13) << "compression";
+    header << std::left << std::setw(18) << "method" << ' ' << std::setw(6)
+           << "dim" << ' ' << std::setw(8) << "nb" << ' ' << std::setw(6)
+           << "nq" << ' ' << std::setw(4) << "k" << ' ' << std::setw(8)
+           << "hnsw_M" << ' ' << std::setw(6) << "efC" << ' ' << std::setw(6)
+           << "efS" << ' ' << std::setw(10) << "ivf_nlist" << ' '
+           << std::setw(10) << "ivf_nprobe" << ' ' << std::setw(6) << "pq_m"
+           << ' ' << std::setw(10) << "pq_nbits" << ' ' << std::setw(10)
+           << "rbq_qb" << ' ' << std::setw(12) << "rbq_centered" << ' '
+           << std::setw(10) << "refine_k" << ' ' << std::setw(12)
+           << "refine_type" << ' ' << std::setw(10) << "qtype" << ' '
+           << std::setw(12) << "train_tm" << ' ' << std::setw(10) << "add_tm"
+           << ' ' << std::setw(12) << "build_tm" << ' ' << std::setw(14)
+           << "search_tm_ms" << ' ' << std::setw(10) << "r@1" << ' '
+           << std::setw(10) << "r@5" << ' ' << std::setw(10) << "r@k" << ' '
+           << std::setw(14) << "mbs_on_disk" << ' ' << std::setw(13)
+           << "compression";
     if (show_mt_columns) {
-      header << ' ' << std::setw(11) << "mt_threads"
-             << ' ' << std::setw(10) << "mt_ms/q"
-             << ' ' << std::setw(12) << "mt_recall@k";
+      header << ' ' << std::setw(11) << "mt_threads" << ' ' << std::setw(10)
+             << "mt_ms/q" << ' ' << std::setw(12) << "mt_recall@k";
     }
     std::string header_line = header.str();
     std::cout << header_line << std::endl;
@@ -1738,23 +1775,16 @@ public:
 
     for (const auto &r : results) {
       std::ostringstream row;
-      row << std::left
-          << std::setw(18) << r.method << ' '
-          << std::setw(6) << r.dim << ' '
-          << std::setw(8) << r.nb << ' '
-          << std::setw(6) << r.nq << ' '
-          << std::setw(4) << r.k << ' '
-          << std::setw(8) << r.hnsw_M << ' '
-          << std::setw(6) << r.efC << ' '
-          << std::setw(6) << r.efS << ' '
-          << std::setw(10) << r.ivf_nlist << ' '
-          << std::setw(10) << r.ivf_nprobe << ' '
-          << std::setw(6) << r.pq_m << ' '
-          << std::setw(10) << r.pq_nbits << ' '
-          << std::setw(10) << r.rabitq_qb << ' '
-          << std::setw(12) << r.rabitq_centered << ' '
-          << std::setw(10) << r.refine_k << ' '
-          << std::setw(12) << (r.refine_type.empty() ? "NA" : r.refine_type) << ' '
+      row << std::left << std::setw(18) << r.method << ' ' << std::setw(6)
+          << r.dim << ' ' << std::setw(8) << r.nb << ' ' << std::setw(6) << r.nq
+          << ' ' << std::setw(4) << r.k << ' ' << std::setw(8) << r.hnsw_M
+          << ' ' << std::setw(6) << r.efC << ' ' << std::setw(6) << r.efS << ' '
+          << std::setw(10) << r.ivf_nlist << ' ' << std::setw(10)
+          << r.ivf_nprobe << ' ' << std::setw(6) << r.pq_m << ' '
+          << std::setw(10) << r.pq_nbits << ' ' << std::setw(10) << r.rabitq_qb
+          << ' ' << std::setw(12) << r.rabitq_centered << ' ' << std::setw(10)
+          << r.refine_k << ' ' << std::setw(12)
+          << (r.refine_type.empty() ? "NA" : r.refine_type) << ' '
           << std::setw(10)
           << ((r.method == std::string("HNSW-SQ") ||
                r.method == std::string("IVF-SQ"))
@@ -1768,13 +1798,13 @@ public:
           << r.search_time_ms << ' ' << std::setw(10) << std::fixed
           << std::setprecision(3) << r.recall_1 << ' ' << std::setw(10)
           << std::fixed << std::setprecision(3) << r.recall_5 << ' '
-          << std::setw(10) << std::fixed << std::setprecision(3)
-          << r.recall_k << ' ' << std::setw(14) << std::fixed
-          << std::setprecision(1) << r.mbs_on_disk;
+          << std::setw(10) << std::fixed << std::setprecision(3) << r.recall_k
+          << ' ' << std::setw(14) << std::fixed << std::setprecision(1)
+          << r.mbs_on_disk;
 
       std::ostringstream cr;
-    if (r.method.find("HNSW-Flat") != std::string::npos ||
-        r.method.find("IVF-Flat") != std::string::npos) {
+      if (r.method.find("HNSW-Flat") != std::string::npos ||
+          r.method.find("IVF-Flat") != std::string::npos) {
         cr << "NA";
       } else {
         cr << std::fixed << std::setprecision(1) << r.compression_ratio;
@@ -1790,8 +1820,7 @@ public:
           row << ' ' << std::setw(12) << std::fixed << std::setprecision(3)
               << r.mt_recall_k;
         } else {
-          row << ' ' << std::setw(10) << "NA"
-              << ' ' << std::setw(12) << "NA";
+          row << ' ' << std::setw(10) << "NA" << ' ' << std::setw(12) << "NA";
         }
       }
 
@@ -1808,8 +1837,10 @@ public:
         }
         std::string base_method = r.method;
         if (base_method.size() > mt_suffix.size() &&
-            base_method.compare(base_method.size() - mt_suffix.size(), mt_suffix.size(), mt_suffix) == 0) {
-          base_method = base_method.substr(0, base_method.size() - mt_suffix.size());
+            base_method.compare(base_method.size() - mt_suffix.size(),
+                                mt_suffix.size(), mt_suffix) == 0) {
+          base_method =
+              base_method.substr(0, base_method.size() - mt_suffix.size());
           if (printed_methods.count(base_method)) {
             continue;
           }
@@ -1820,13 +1851,16 @@ public:
         }
         printed_methods.insert(base_method);
 
-        std::cout << "  - " << r.method << " (" << r.mt_threads << " threads): "
-                  << std::fixed << std::setprecision(3) << r.mt_search_time_ms << " ms/q";
-        if (r.search_time_ms > 0.0 && std::fabs(r.search_time_ms - r.mt_search_time_ms) > 1e-6) {
-          std::cout << " (single " << std::setprecision(3) << r.search_time_ms << " ms/q)";
+        std::cout << "  - " << r.method << " (" << r.mt_threads
+                  << " threads): " << std::fixed << std::setprecision(3)
+                  << r.mt_search_time_ms << " ms/q";
+        if (r.search_time_ms > 0.0 &&
+            std::fabs(r.search_time_ms - r.mt_search_time_ms) > 1e-6) {
+          std::cout << " (single " << std::setprecision(3) << r.search_time_ms
+                    << " ms/q)";
         }
-        std::cout << ", recall@" << r.k << "="
-                  << std::setprecision(3) << r.mt_recall_k << std::endl;
+        std::cout << ", recall@" << r.k << "=" << std::setprecision(3)
+                  << r.mt_recall_k << std::endl;
       }
     }
   }
@@ -1835,12 +1869,12 @@ public:
                    const std::string &path) {
     std::ofstream csv_file(path);
     if (csv_file.is_open()) {
-    csv_file << "method,dim,nb,nq,k,hnsw_M,efC,efS,ivf_nlist,ivf_nprobe,pq_m,"
-          "pq_nbits,rabitq_qb,rabitq_centered,refine_k,refine_type,"
-          "qtype,train_"
-          "time,add_time,build_time,search_time_ms,recall_at_1,"
-          "recall_at_5,recall_at_k,mbs_on_disk,compression_ratio,"
-          "mt_threads,mt_search_time_ms,mt_recall_at_k\n";
+      csv_file << "method,dim,nb,nq,k,hnsw_M,efC,efS,ivf_nlist,ivf_nprobe,pq_m,"
+                  "pq_nbits,rabitq_qb,rabitq_centered,refine_k,refine_type,"
+                  "qtype,train_"
+                  "time,add_time,build_time,search_time_ms,recall_at_1,"
+                  "recall_at_5,recall_at_k,mbs_on_disk,compression_ratio,"
+                  "mt_threads,mt_search_time_ms,mt_recall_at_k\n";
       for (const auto &r : results) {
         csv_file << r.method << "," << r.dim << "," << r.nb << "," << r.nq
                  << "," << r.k << "," << r.hnsw_M << "," << r.efC << ","
@@ -1959,8 +1993,8 @@ static void normalizeVectorsStandalone(float *vectors, int n, int d) {
 }
 
 static double computeRecallAtK(const std::vector<faiss::idx_t> &predicted,
-                               const std::vector<faiss::idx_t> &truth,
-                               int nq, int stride, int eval_k) {
+                               const std::vector<faiss::idx_t> &truth, int nq,
+                               int stride, int eval_k) {
   if (nq <= 0 || stride <= 0 || eval_k <= 0) {
     return 0.0;
   }
@@ -1974,7 +2008,9 @@ static double computeRecallAtK(const std::vector<faiss::idx_t> &predicted,
     }
     int hits = 0;
     for (int j = 0; j < actual_k; ++j) {
-      if (truth_set.find(predicted[static_cast<std::size_t>(qi) * stride + j]) != truth_set.end()) {
+      if (truth_set.find(
+              predicted[static_cast<std::size_t>(qi) * stride + j]) !=
+          truth_set.end()) {
         ++hits;
       }
     }
@@ -1983,12 +2019,15 @@ static double computeRecallAtK(const std::vector<faiss::idx_t> &predicted,
   return recall_sum / nq;
 }
 
-static std::optional<PQBenchmark::TestResult> runMultiThreadSmokeTest(const Options &opt) {
+static std::optional<PQBenchmark::TestResult>
+runMultiThreadSmokeTest(const Options &opt) {
   if (!opt.run_mt_test) {
     return std::nullopt;
   }
-  const int threads = opt.mt_threads > 0 ? opt.mt_threads
-                                          : static_cast<int>(std::thread::hardware_concurrency());
+  const int threads =
+      opt.mt_threads > 0
+          ? opt.mt_threads
+          : static_cast<int>(std::thread::hardware_concurrency());
   if (threads <= 1) {
     std::cout << "\n[MT] 多线程冒烟测试跳过：线程数<=1" << std::endl;
     return std::nullopt;
@@ -2003,7 +2042,8 @@ static std::optional<PQBenchmark::TestResult> runMultiThreadSmokeTest(const Opti
   const int nq = opt.nq;
   const int k = opt.k;
 
-  std::cout << "\n=== Multi-thread Smoke Test (HNSW-Flat, threads=" << threads << ") ===" << std::endl;
+  std::cout << "\n=== Multi-thread Smoke Test (HNSW-Flat, threads=" << threads
+            << ") ===" << std::endl;
 
   std::vector<float> database(static_cast<std::size_t>(nb) * dim);
   std::vector<float> queries(static_cast<std::size_t>(nq) * dim);
@@ -2023,7 +2063,8 @@ static std::optional<PQBenchmark::TestResult> runMultiThreadSmokeTest(const Opti
   {
     faiss::IndexFlatL2 gt_index(dim);
     gt_index.add(nb, database.data());
-    gt_index.search(nq, queries.data(), k, gt_distances.data(), gt_labels.data());
+    gt_index.search(nq, queries.data(), k, gt_distances.data(),
+                    gt_labels.data());
   }
 
   faiss::IndexHNSWFlat index(dim, opt.hnsw_M);
@@ -2036,11 +2077,13 @@ static std::optional<PQBenchmark::TestResult> runMultiThreadSmokeTest(const Opti
   auto seq_t0 = std::chrono::high_resolution_clock::now();
   index.search(nq, queries.data(), k, seq_distances.data(), seq_labels.data());
   auto seq_t1 = std::chrono::high_resolution_clock::now();
-  const double seq_total_ms = std::chrono::duration<double, std::milli>(seq_t1 - seq_t0).count();
+  const double seq_total_ms =
+      std::chrono::duration<double, std::milli>(seq_t1 - seq_t0).count();
   const double seq_ms_per_query = nq > 0 ? seq_total_ms / nq : 0.0;
   const double seq_recall_k = computeRecallAtK(seq_labels, gt_labels, nq, k, k);
   const double seq_recall_1 = computeRecallAtK(seq_labels, gt_labels, nq, k, 1);
-  const double seq_recall_5 = computeRecallAtK(seq_labels, gt_labels, nq, k, std::min(5, k));
+  const double seq_recall_5 =
+      computeRecallAtK(seq_labels, gt_labels, nq, k, std::min(5, k));
 
   std::vector<float> mt_distances(static_cast<std::size_t>(nq) * k);
   std::vector<faiss::idx_t> mt_labels(static_cast<std::size_t>(nq) * k, -1);
@@ -2049,8 +2092,7 @@ static std::optional<PQBenchmark::TestResult> runMultiThreadSmokeTest(const Opti
       return;
     }
     index.search(static_cast<faiss::idx_t>(count),
-                 queries.data() + start * static_cast<std::size_t>(dim),
-                 k,
+                 queries.data() + start * static_cast<std::size_t>(dim), k,
                  mt_distances.data() + start * static_cast<std::size_t>(k),
                  mt_labels.data() + start * static_cast<std::size_t>(k));
   };
@@ -2058,12 +2100,15 @@ static std::optional<PQBenchmark::TestResult> runMultiThreadSmokeTest(const Opti
   std::vector<std::thread> workers;
   workers.reserve(static_cast<std::size_t>(threads));
   const std::size_t total_queries = static_cast<std::size_t>(nq);
-  const std::size_t base_chunk = total_queries / static_cast<std::size_t>(threads);
-  const std::size_t remainder = total_queries % static_cast<std::size_t>(threads);
+  const std::size_t base_chunk =
+      total_queries / static_cast<std::size_t>(threads);
+  const std::size_t remainder =
+      total_queries % static_cast<std::size_t>(threads);
   std::size_t cursor = 0;
   auto mt_t0 = std::chrono::high_resolution_clock::now();
   for (int t = 0; t < threads; ++t) {
-    std::size_t count = base_chunk + (static_cast<std::size_t>(t) < remainder ? 1 : 0);
+    std::size_t count =
+        base_chunk + (static_cast<std::size_t>(t) < remainder ? 1 : 0);
     if (count == 0) {
       continue;
     }
@@ -2078,7 +2123,8 @@ static std::optional<PQBenchmark::TestResult> runMultiThreadSmokeTest(const Opti
     shard_search(cursor, total_queries - cursor);
   }
   auto mt_t1 = std::chrono::high_resolution_clock::now();
-  const double mt_total_ms = std::chrono::duration<double, std::milli>(mt_t1 - mt_t0).count();
+  const double mt_total_ms =
+      std::chrono::duration<double, std::milli>(mt_t1 - mt_t0).count();
   const double mt_ms_per_query = nq > 0 ? mt_total_ms / nq : 0.0;
   const double mt_recall_k = computeRecallAtK(mt_labels, gt_labels, nq, k, k);
   bool match = true;
@@ -2087,10 +2133,10 @@ static std::optional<PQBenchmark::TestResult> runMultiThreadSmokeTest(const Opti
   }
 
   std::cout << std::fixed << std::setprecision(3)
-            << "Sequential : " << seq_ms_per_query << " ms/query, recall@" << k << "="
-            << seq_recall_k << std::endl;
-  std::cout << "Multi-thread: " << mt_ms_per_query << " ms/query, recall@" << k << "="
-            << mt_recall_k << std::endl;
+            << "Sequential : " << seq_ms_per_query << " ms/query, recall@" << k
+            << "=" << seq_recall_k << std::endl;
+  std::cout << "Multi-thread: " << mt_ms_per_query << " ms/query, recall@" << k
+            << "=" << mt_recall_k << std::endl;
   if (opt.verify_mt) {
     std::cout << "Verification: " << (match ? "PASS" : "FAIL") << std::endl;
     if (!match) {
@@ -2099,7 +2145,8 @@ static std::optional<PQBenchmark::TestResult> runMultiThreadSmokeTest(const Opti
   }
 
   const double mt_recall_1 = computeRecallAtK(mt_labels, gt_labels, nq, k, 1);
-  const double mt_recall_5 = computeRecallAtK(mt_labels, gt_labels, nq, k, std::min(5, k));
+  const double mt_recall_5 =
+      computeRecallAtK(mt_labels, gt_labels, nq, k, std::min(5, k));
 
   PQBenchmark::TestResult result;
   result.method = "HNSW-Flat";
@@ -2129,8 +2176,8 @@ static std::optional<PQBenchmark::TestResult> runMultiThreadSmokeTest(const Opti
   return result;
 }
 
-static std::vector<PQBenchmark::TestResult>
-expandResultsWithMtVariants(const std::vector<PQBenchmark::TestResult> &results) {
+static std::vector<PQBenchmark::TestResult> expandResultsWithMtVariants(
+    const std::vector<PQBenchmark::TestResult> &results) {
   std::vector<PQBenchmark::TestResult> expanded;
   expanded.reserve(results.size() * 2);
   constexpr const char *kMtSuffix = "-mt";
@@ -2228,16 +2275,16 @@ int main(int argc, char **argv) {
         if (opt.pq_train_ratio > 1.0)
           opt.pq_train_ratio = 1.0;
       }
-    // } else if (a == "--sq-qtype") {  // removed - now specified in --which
-    //   std::string s;
-    //   nexts(s);
-    //   if (s.find(',') != std::string::npos) {
-    //     auto parts = splitCSV(s);
-    //     for (auto &p : parts)
-    //       opt.sq_qtype_list.push_back(parseQType(p));
-    //   } else {
-    //     opt.sq_qtype = parseQType(s);
-    //   }
+      // } else if (a == "--sq-qtype") {  // removed - now specified in --which
+      //   std::string s;
+      //   nexts(s);
+      //   if (s.find(',') != std::string::npos) {
+      //     auto parts = splitCSV(s);
+      //     for (auto &p : parts)
+      //       opt.sq_qtype_list.push_back(parseQType(p));
+      //   } else {
+      //     opt.sq_qtype = parseQType(s);
+      //   }
     } else if (a == "--ivf-nlist") {
       handleListOrSingleInt(opt.ivf_nlist_list, opt.ivf_nlist);
     } else if (a == "--ivf-nprobe") {
@@ -2336,31 +2383,39 @@ int main(int argc, char **argv) {
              "  --rbq-refine-k INT[,INT...]     refine k-factor (>=1), "
              "multiplier of k for first-stage candidates (default 2)\n"
              "  --which STR                  comma list: "
-             "all|hnsw_flat|hnsw_sq4|hnsw_sq8|hnsw_pq|hnsw_rabitq|ivf_flat|ivf_sq4|ivf_sq8|ivf_pq|"
+             "all|hnsw_flat|hnsw_sq4|hnsw_sq8|hnsw_pq|hnsw_rabitq|ivf_flat|ivf_"
+             "sq4|ivf_sq8|ivf_pq|"
              "ivf_rbq|rbq_refine|ivf_rbq_refine|rabitq "
              "(default all)\n"
              "  --out-csv PATH      output csv path (default "
              "hnsw_index_types_results.csv)\n"
-             "  --save-data-dir PATH         save test data (database, queries, groundtruth) "
+             "  --save-data-dir PATH         save test data (database, "
+             "queries, groundtruth) "
              "to specified directory\n"
-             "  --load-data-dir PATH         load test data from specified directory "
+             "  --load-data-dir PATH         load test data from specified "
+             "directory "
              "(if files exist, skips generation)\n"
              "  --transpose-centroid         enable PQ transposed centroids "
              "(default off)\n"
              "  --no-transpose-centroid      disable PQ transposed centroids "
              "(override)\n"
-             "  --vecml-base-path PATH         path to VecML SDK directory (contains lib and headers)\n"
-        "  --vecml-license PATH           path to VecML license file (optional, default: license.txt)\n";
+             "  --vecml-base-path PATH         path to VecML SDK directory "
+             "(contains lib and headers)\n"
+             "  --vecml-license PATH           path to VecML license file "
+             "(optional, default: license.txt)\n";
       std::cout
-     << "  --mt-threads INT             threads for multi-thread smoke test (default: hardware threads)\n"
-     << "  --no-mt-test                 disable multi-thread smoke test\n"
-     << "  --no-mt-verify               skip verification between single and multi-thread results\n";
+          << "  --mt-threads INT             threads for multi-thread smoke "
+             "test (default: hardware threads)\n"
+          << "  --no-mt-test                 disable multi-thread smoke test\n"
+          << "  --no-mt-verify               skip verification between single "
+             "and multi-thread results\n";
       return 0;
     }
   }
 
   try {
-    PQBenchmark bench(opt.dim, opt.nb, opt.nq, opt.k, opt.transpose_centroid, opt.save_data_dir, opt.load_data_dir);
+    PQBenchmark bench(opt.dim, opt.nb, opt.nq, opt.k, opt.transpose_centroid,
+                      opt.save_data_dir, opt.load_data_dir);
     auto results = bench.runIndexTypeBenchmarks(opt);
 
     // If VecML is requested (either via --which=vecml or by providing a
@@ -2389,7 +2444,8 @@ int main(int argc, char **argv) {
     }
 #else
     if (want_vecml) {
-      std::cerr << "VecML support not compiled in (HAVE_VECML not defined)." << std::endl;
+      std::cerr << "VecML support not compiled in (HAVE_VECML not defined)."
+                << std::endl;
     }
 #endif
     if (auto mt = runMultiThreadSmokeTest(opt)) {
