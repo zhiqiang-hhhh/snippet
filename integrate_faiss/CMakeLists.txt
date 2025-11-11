@@ -45,6 +45,8 @@ set(BUILD_TESTING OFF CACHE BOOL "Disable FAISS testing")
 # EXCLUDE_FROM_ALL so that binary in faiss is not installed.
 add_subdirectory(${PROJECT_SOURCE_DIR}/contrib/faiss ${PROJECT_BINARY_DIR}/faiss EXCLUDE_FROM_ALL)
 
+find_package(Threads REQUIRED)
+
 add_executable(integrate_faiss main.cpp)
 target_link_libraries(integrate_faiss PRIVATE faiss)
 
@@ -58,7 +60,7 @@ add_executable(sq sq.cpp)
 target_link_libraries(sq PRIVATE faiss)
 
 add_executable(faiss_analysis faiss_analysis.cpp)
-target_link_libraries(faiss_analysis PRIVATE faiss)
+target_link_libraries(faiss_analysis PRIVATE faiss Threads::Threads)
 
 # VecML (Fluffy) support: optional C shim to avoid C++ ABI conflicts
 option(VECML_LIB_PATH "Path to VecML SDK dir containing fluffy_interface.h and libfluffy_shared_lib.so" "")
