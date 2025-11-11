@@ -407,7 +407,7 @@ public:
     double search_time_ms = 0.0; // per query
     double recall_1 = 0.0;
     double recall_5 = 0.0;
-    double recall_10 = 0.0;
+    double recall_k = 0.0;
     double mbs_on_disk = 0.0; // serialized index size in MB
     double compression_ratio = 0.0;
   };
@@ -487,7 +487,7 @@ public:
 
       r.recall_1 = computeRecall(labels, ground_truth, 1);
       r.recall_5 = computeRecall(labels, ground_truth, 5);
-      r.recall_10 = computeRecall(labels, ground_truth, k);
+      r.recall_k = computeRecall(labels, ground_truth, k);
 
       // Serialize index to a temporary file to measure real memory footprint
       // (including graph + codes)
@@ -548,7 +548,7 @@ public:
 
       r.recall_1 = computeRecall(labels, ground_truth, 1);
       r.recall_5 = computeRecall(labels, ground_truth, 5);
-      r.recall_10 = computeRecall(labels, ground_truth, k);
+      r.recall_k = computeRecall(labels, ground_truth, k);
 
       int bits = 8;
       using QT = faiss::ScalarQuantizer::QuantizerType;
@@ -648,7 +648,7 @@ public:
 
       r.recall_1 = computeRecall(labels, ground_truth, 1);
       r.recall_5 = computeRecall(labels, ground_truth, 5);
-      r.recall_10 = computeRecall(labels, ground_truth, k);
+      r.recall_k = computeRecall(labels, ground_truth, k);
 
       r.mbs_on_disk = measureIndexSerializedSize(&index);
       if (nb > 0) {
@@ -709,7 +709,7 @@ public:
 
       r.recall_1 = computeRecall(labels, ground_truth, 1);
       r.recall_5 = computeRecall(labels, ground_truth, 5);
-      r.recall_10 = computeRecall(labels, ground_truth, k);
+      r.recall_k = computeRecall(labels, ground_truth, k);
 
       r.mbs_on_disk = measureIndexSerializedSize(&index);
       if (nb > 0) {
@@ -766,7 +766,7 @@ public:
 
       r.recall_1 = computeRecall(labels, ground_truth, 1);
       r.recall_5 = computeRecall(labels, ground_truth, 5);
-      r.recall_10 = computeRecall(labels, ground_truth, k);
+      r.recall_k = computeRecall(labels, ground_truth, k);
 
       r.mbs_on_disk = measureIndexSerializedSize(&index);
       // For IVF-Flat, vectors stored in float -> no compression
@@ -831,7 +831,7 @@ public:
 
       r.recall_1 = computeRecall(labels, ground_truth, 1);
       r.recall_5 = computeRecall(labels, ground_truth, 5);
-      r.recall_10 = computeRecall(labels, ground_truth, k);
+      r.recall_k = computeRecall(labels, ground_truth, k);
 
       r.mbs_on_disk = measureIndexSerializedSize(&index);
       if (nb > 0) {
@@ -888,7 +888,7 @@ public:
 
       r.recall_1 = computeRecall(labels, ground_truth, 1);
       r.recall_5 = computeRecall(labels, ground_truth, 5);
-      r.recall_10 = computeRecall(labels, ground_truth, k);
+      r.recall_k = computeRecall(labels, ground_truth, k);
 
       r.mbs_on_disk = measureIndexSerializedSize(&index);
       if (nb > 0) {
@@ -970,7 +970,7 @@ public:
 
       r.recall_1 = computeRecall(labels, ground_truth, 1);
       r.recall_5 = computeRecall(labels, ground_truth, 5);
-      r.recall_10 = computeRecall(labels, ground_truth, k);
+      r.recall_k = computeRecall(labels, ground_truth, k);
 
       r.mbs_on_disk = measureIndexSerializedSize(idx_rr.get());
       if (nb > 0) {
@@ -1091,7 +1091,7 @@ public:
 
       r.recall_1 = computeRecall(labels, ground_truth, 1);
       r.recall_5 = computeRecall(labels, ground_truth, 5);
-      r.recall_10 = computeRecall(labels, ground_truth, k);
+      r.recall_k = computeRecall(labels, ground_truth, k);
 
       r.mbs_on_disk = measureIndexSerializedSize(wrapper.get());
       if (nb > 0) {
@@ -1143,7 +1143,7 @@ public:
 
       r.recall_1 = computeRecall(labels, ground_truth, 1);
       r.recall_5 = computeRecall(labels, ground_truth, 5);
-      r.recall_10 = computeRecall(labels, ground_truth, k);
+      r.recall_k = computeRecall(labels, ground_truth, k);
 
       r.mbs_on_disk = measureIndexSerializedSize(&index);
       if (nb > 0) {
@@ -1195,6 +1195,11 @@ public:
       r.train_time = 0.0; // no train step in VecML
       r.build_time = r.add_time;
 
+      // Get file size after adding data
+      double disk_mb = vecml_get_disk_mb(ctx);
+      std::cerr << "vecml_add_data: total disk usage after add: " << disk_mb << " MB\n";
+      r.mbs_on_disk = disk_mb;
+
       // Search timing
       std::vector<long> out_ids((size_t)nq * k, -1);
       auto t_s0 = std::chrono::high_resolution_clock::now();
@@ -1219,7 +1224,7 @@ public:
       }
       r.recall_1 = computeRecall(labels, ground_truth, 1);
       r.recall_5 = computeRecall(labels, ground_truth, 5);
-      r.recall_10 = computeRecall(labels, ground_truth, k);
+      r.recall_k = computeRecall(labels, ground_truth, k);
 
       vecml_destroy(ctx);
       return r;
@@ -1506,7 +1511,7 @@ public:
     auto best_recall =
         *std::max_element(results.begin(), results.end(),
                           [](const TestResult &a, const TestResult &b) {
-                            return a.recall_10 < b.recall_10;
+                            return a.recall_k < b.recall_k;
                           });
     auto fastest =
         *std::min_element(results.begin(), results.end(),
@@ -1531,7 +1536,7 @@ public:
     };
     std::cout << "🎯 最高召回: " << best_recall.method << "("
               << fmtParams(best_recall) << ") R@" << best_recall.k << "="
-              << std::fixed << std::setprecision(3) << best_recall.recall_10
+              << std::fixed << std::setprecision(3) << best_recall.recall_k
               << std::endl;
     std::cout << "⚡ 最快搜索: " << fastest.method << "(" << fmtParams(fastest)
               << ") " << std::setprecision(2) << fastest.search_time_ms
@@ -1605,7 +1610,7 @@ public:
                 << std::setprecision(3) << r.recall_1 << ' ' << std::setw(10)
                 << std::fixed << std::setprecision(3) << r.recall_5 << ' '
                 << std::setw(10) << std::fixed << std::setprecision(3)
-                << r.recall_10 << ' ' << std::setw(14) << std::fixed
+                << r.recall_k << ' ' << std::setw(14) << std::fixed
                 << std::setprecision(1) << r.mbs_on_disk;
       // compression ratio: not applicable for HNSW-Flat
       {
@@ -1643,7 +1648,7 @@ public:
                          : std::string("NA"))
                  << "," << r.train_time << "," << r.add_time << ","
                  << r.build_time << "," << r.search_time_ms << "," << r.recall_1
-                 << "," << r.recall_5 << "," << r.recall_10 << ","
+                 << "," << r.recall_5 << "," << r.recall_k << ","
                  << r.mbs_on_disk << ",";
         if (r.method == "HNSW-Flat" || r.method == "IVF-Flat")
           csv_file << "NA";

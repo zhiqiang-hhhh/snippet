@@ -26,6 +26,24 @@ extern "C" {
 
 vecml_ctx_t vecml_create(const char* base_path, const char* license_path) {
   try {
+    // Clean up any existing test database (actually remove the directory so
+    // we don't accidentally load an old index with mismatched settings).
+    try {
+      if (base_path && !std::string(base_path).empty()) {
+        std::error_code ec;
+        std::filesystem::remove_all(base_path, ec);
+        if (ec) {
+          std::cerr << "vecml_create: failed to remove existing base path " << base_path
+                    << " error=" << ec.message() << "\n";
+        } else {
+          std::cerr << "vecml_create: removed existing base path " << base_path << "\n";
+        }
+      } else {
+        std::cerr << "vecml_create: base_path is null or empty\n";
+      }
+    } catch (const std::exception &e) {
+      std::cerr << "vecml_create: exception while removing base path: " << e.what() << "\n";
+    }
     VecMLHandle* h = new VecMLHandle();
     h->api = std::make_unique<fluffy::FluffyInterface>(std::string(base_path), std::string(license_path));
     h->base_path = base_path ? std::string(base_path) : std::string();
@@ -38,20 +56,11 @@ vecml_ctx_t vecml_create(const char* base_path, const char* license_path) {
       return nullptr;
     }
 
-    // Attach a default dense index named "test_index" using NegativeCosineSimilarity
-    // The signature follows the SDK: attach_index(dim, type, similarity, index_name, shards)
+    // Choose a default index name. Don't rely on get_vector_dim() here because
+    // no vectors have been added yet; attach_index will be invoked later from
+    // vecml_add_data when the vector dimension is known (to ensure the index
+    // is created with the correct dim and distance metric).
     std::string idx_name = "test_index";
-    fluffy::ErrorCode attach_ec = h->api->attach_index(h->api->get_vector_dim() > 0 ? (int)h->api->get_vector_dim() : 0,
-                                                      "dense",
-                                                      fluffy::DistanceFunctionType::Euclidean,
-                                                      idx_name,
-                                                      1);
-    // If attach fails because vector dim is not yet known, try attaching later when adding data.
-    if (attach_ec != fluffy::ErrorCode::Success) {
-      // Log but continue — add_data will still work because add_data_batch can create index implicitly
-      std::cerr << "vecml_create warning: attach_index returned " << static_cast<int>(attach_ec) << std::endl;
-    }
-    // store chosen index name for later search/add calls
     h->index_name = idx_name;
     return reinterpret_cast<vecml_ctx_t>(h);
   } catch (const std::exception& e) {
@@ -64,6 +73,21 @@ int vecml_add_data(vecml_ctx_t ctx, const float* data, int n, int dim, const lon
   if (!ctx) return -1;
   VecMLHandle* h = reinterpret_cast<VecMLHandle*>(ctx);
   try {
+    // Ensure an index exists with the correct dimension and distance type.
+    // If no index was attached earlier (or vector dim is unknown), attach
+    // one now using the provided `dim` and Euclidean distance so results
+    // match Faiss's L2 baseline.
+    if (h->api->get_vector_dim() == 0) {
+      // cast to int to match the SDK overload - dim_t is an SDK typedef
+      fluffy::ErrorCode attach_ec = h->api->attach_index((int)dim, "dense",
+                                                         fluffy::DistanceFunctionType::Euclidean,
+                                                         h->index_name, 1);
+      if (attach_ec != fluffy::ErrorCode::Success) {
+        std::cerr << "vecml_add_data warning: attach_index returned " << static_cast<int>(attach_ec) << std::endl;
+        // continue: add_data_batch may create index implicitly, but we tried
+        // to make behavior explicit for correct metric/dim.
+      }
+    }
     // Prepare batch of (string_id, unique_ptr<Vector>) as the SDK expects
     std::vector<std::pair<std::string, std::unique_ptr<fluffy::Vector>>> batch;
     batch.reserve(n);
@@ -96,7 +120,10 @@ int vecml_add_data(vecml_ctx_t ctx, const float* data, int n, int dim, const lon
     fluffy::ErrorCode flush_ec = h->api->flush();
     if (flush_ec != fluffy::ErrorCode::Success) {
       std::cerr << "vecml_add_data: flush returned " << static_cast<int>(flush_ec) << std::endl;
+    } else {
+      std::cerr << "vecml_add_data: flush successful\n";
     }
+
     return 0;
   } catch (const std::exception& e) {
     std::cerr << "vecml_add_data error: " << e.what() << std::endl;
@@ -122,9 +149,12 @@ int vecml_search(vecml_ctx_t ctx, const float* queries, int nq, int dim, int k, 
         std::cerr << "vecml_search: build_vector_dense failed for query " << i << "\n";
         return -2;
       }
-      fluffy::Query q;
+  fluffy::Query q;
       q.top_k = k;
-      q.vector = vec.get();
+  q.vector = vec.get();
+  // Explicitly request Euclidean (L2) similarity so results align with
+  // the Faiss L2 baseline used by the benchmark.
+  q.similarity_measure = fluffy::DistanceFunctionType::Euclidean;
       // default similarity_measure will be used
       queries_vec.push_back(q);
       qvecs_hold.push_back(std::move(vec));
