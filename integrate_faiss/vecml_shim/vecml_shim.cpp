@@ -21,6 +21,11 @@ struct VecMLHandle {
   std::string index_name; // name of the attached index to use for searches
   std::string
       base_path; // store base path provided at creation for disk-size queries
+  // Fast index options
+  bool use_fast_index = false;
+  float fast_shrink_rate = 0.4f;
+  int fast_max_samples = 100000;
+  int fast_index_threads = 1;
 };
 
 extern "C" {
@@ -87,9 +92,19 @@ int vecml_add_data(vecml_ctx_t ctx, const float *data, int n, int dim,
     // match Faiss's L2 baseline.
     if (h->api->get_vector_dim() == 0) {
       // cast to int to match the SDK overload - dim_t is an SDK typedef
-      fluffy::ErrorCode attach_ec = h->api->attach_index(
-          (int)dim, "dense", fluffy::DistanceFunctionType::Euclidean,
-          h->index_name, 1);
+      fluffy::ErrorCode attach_ec = fluffy::ErrorCode::Success;
+      if (h->use_fast_index) {
+        // Use fast index (soil index)
+        h->index_name = "fast_index";
+        attach_ec = h->api->attach_soil_index(
+            (int)dim, "dense", fluffy::DistanceFunctionType::Euclidean,
+            h->fast_shrink_rate, h->index_name, h->fast_max_samples,
+            h->fast_index_threads);
+      } else {
+        attach_ec = h->api->attach_index(
+            (int)dim, "dense", fluffy::DistanceFunctionType::Euclidean,
+            h->index_name, 1);
+      }
       if (attach_ec != fluffy::ErrorCode::Success) {
         std::cerr << "vecml_add_data warning: attach_index returned "
                   << static_cast<int>(attach_ec) << std::endl;
@@ -262,6 +277,28 @@ double vecml_get_disk_mb(vecml_ctx_t ctx) {
   } catch (...) {
     return -1.0;
   }
+}
+
+} // extern C
+
+extern "C" {
+
+int vecml_enable_fast_index(vecml_ctx_t ctx, float shrink_rate,
+                            int max_num_samples, int num_threads) {
+  if (!ctx)
+    return -1;
+  VecMLHandle *h = reinterpret_cast<VecMLHandle *>(ctx);
+  if (shrink_rate <= 0.0f || shrink_rate > 1.0f)
+    shrink_rate = 0.4f;
+  if (max_num_samples <= 0)
+    max_num_samples = 100000;
+  if (num_threads <= 0)
+    num_threads = 1;
+  h->use_fast_index = true;
+  h->fast_shrink_rate = shrink_rate;
+  h->fast_max_samples = max_num_samples;
+  h->fast_index_threads = num_threads;
+  return 0;
 }
 
 } // extern C

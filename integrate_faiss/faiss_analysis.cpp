@@ -1712,6 +1712,148 @@ public:
   }
 #endif
 
+#ifdef HAVE_VECML
+  // VecML Fast Index test (attach_soil_index) using the C shim
+  TestResult testVecMLFastIdx(const std::string &base_path,
+                              const std::string &license_path,
+                              int mt_threads_option) {
+    TestResult r{};
+    r.method = "VecML-Fast-Idx";
+    r.dim = dim;
+    r.nb = nb;
+    r.nq = nq;
+    r.k = k;
+    vecml_ctx_t ctx = vecml_create(base_path.c_str(), license_path.c_str());
+    if (!ctx) {
+      std::cerr << "VecML-Fast-Idx: failed to create context" << std::endl;
+      r.build_time = -1;
+      return r;
+    }
+    // Enable fast index before adding data. Use sensible defaults.
+    int index_threads = mt_threads_option > 0 ? mt_threads_option : 8;
+    if (vecml_enable_fast_index(ctx, /*shrink_rate=*/0.4f,
+                                /*max_num_samples=*/std::max(nb, 100000),
+                                index_threads) != 0) {
+      std::cerr << "VecML-Fast-Idx: enable_fast_index failed" << std::endl;
+      vecml_destroy(ctx);
+      r.build_time = -1;
+      return r;
+    }
+
+    try {
+      auto t_add0 = std::chrono::high_resolution_clock::now();
+      int add_ret = vecml_add_data(ctx, database.data(), nb, dim, nullptr);
+      auto t_add1 = std::chrono::high_resolution_clock::now();
+      if (add_ret != 0) {
+        std::cerr << "VecML-Fast-Idx: add_data failed: " << add_ret
+                  << std::endl;
+        vecml_destroy(ctx);
+        r.build_time = -1;
+        return r;
+      }
+      r.add_time = std::chrono::duration<double>(t_add1 - t_add0).count();
+      r.train_time = 0.0;
+      r.build_time = r.add_time;
+
+      double disk_mb = vecml_get_disk_mb(ctx);
+      std::cerr << "vecml_fast_add_data: total disk usage after add: "
+                << disk_mb << " MB\n";
+
+      std::vector<long> out_ids((size_t)nq * k, -1);
+      auto t_s0 = std::chrono::high_resolution_clock::now();
+      int sret = vecml_search(ctx, queries.data(), nq, dim, k, out_ids.data());
+      auto t_s1 = std::chrono::high_resolution_clock::now();
+      if (sret != 0) {
+        std::cerr << "VecML-Fast-Idx: search failed: " << sret << std::endl;
+        vecml_destroy(ctx);
+        r.build_time = -1;
+        return r;
+      }
+      double search_sec = std::chrono::duration<double>(t_s1 - t_s0).count();
+      r.search_time_ms = nq > 0 ? (search_sec / (double)nq) * 1000.0 : 0.0;
+
+      std::vector<faiss::idx_t> labels((size_t)nq * k);
+      for (int i = 0; i < nq * k; ++i) {
+        labels[i] = out_ids[i] >= 0 ? static_cast<faiss::idx_t>(out_ids[i]) : -1;
+      }
+      r.recall_1 = computeRecall(labels, ground_truth, 1);
+      r.recall_5 = computeRecall(labels, ground_truth, 5);
+      r.recall_k = computeRecall(labels, ground_truth, k);
+
+      // Optional: MT smoke test mirrors testVecML
+      int threads = mt_threads_option;
+      if (threads > 1 && nq > 0 && k > 0) {
+        std::cout << "\n=== VecML Fast-Idx Multi-thread Smoke Test (threads="
+                  << threads << ") ===" << std::endl;
+        std::vector<long> mt_out((size_t)nq * k, -1);
+        std::atomic<int> mt_err{0};
+        auto run_chunk = [&](std::size_t start, std::size_t count) {
+          if (count == 0 || mt_err.load(std::memory_order_relaxed) != 0)
+            return;
+          int ret = vecml_search(ctx, queries.data() + start * (std::size_t)dim,
+                                 static_cast<int>(count), dim, k,
+                                 mt_out.data() + start * (std::size_t)k);
+          if (ret != 0)
+            mt_err.store(ret, std::memory_order_relaxed);
+        };
+        std::vector<std::thread> workers;
+        workers.reserve((size_t)threads);
+        std::size_t total_queries = (std::size_t)nq;
+        std::size_t base_chunk = total_queries / (std::size_t)threads;
+        std::size_t remainder = total_queries % (std::size_t)threads;
+        std::size_t cursor = 0;
+        auto mt_t0 = std::chrono::high_resolution_clock::now();
+        for (int t = 0; t < threads; ++t) {
+          std::size_t count = base_chunk + ((std::size_t)t < remainder ? 1 : 0);
+          if (count == 0)
+            continue;
+          std::size_t start = cursor;
+          workers.emplace_back(
+              [&, start, count]() { run_chunk(start, count); });
+          cursor += count;
+        }
+        for (auto &w : workers)
+          w.join();
+        auto mt_t1 = std::chrono::high_resolution_clock::now();
+        int mt_code = mt_err.load(std::memory_order_relaxed);
+        if (mt_code == 0) {
+          double mt_total_ms =
+              std::chrono::duration<double, std::milli>(mt_t1 - mt_t0).count();
+          double mt_ms_per_query = nq > 0 ? mt_total_ms / (double)nq : 0.0;
+          std::vector<faiss::idx_t> mt_labels((size_t)nq * k);
+          for (int i = 0; i < nq * k; ++i) {
+            mt_labels[i] = mt_out[i] >= 0 ? (faiss::idx_t)mt_out[i] : -1;
+          }
+          r.has_mt = true;
+          r.mt_threads = threads;
+          r.mt_search_time_ms = mt_ms_per_query;
+          r.mt_recall_1 = computeRecall(mt_labels, ground_truth, 1);
+          r.mt_recall_5 = computeRecall(mt_labels, ground_truth, std::min(5, k));
+          r.mt_recall_k = computeRecall(mt_labels, ground_truth, k);
+        }
+      }
+
+      vecml_destroy(ctx);
+      double final_disk_mb = computeDirectorySizeMB(base_path);
+      if (final_disk_mb >= 0.0) {
+        r.mbs_on_disk = final_disk_mb;
+        double raw_mb =
+            (double)nb * (double)dim * sizeof(float) / (1024.0 * 1024.0);
+        if (final_disk_mb > 0.0) {
+          r.compression_ratio = raw_mb / final_disk_mb;
+        }
+      }
+      return r;
+    } catch (const std::exception &e) {
+      std::cerr << "VecML-Fast-Idx: exception during add/search: " << e.what()
+                << std::endl;
+      vecml_destroy(ctx);
+      r.build_time = -1;
+      return r;
+    }
+  }
+#endif
+
   std::vector<TestResult> runIndexTypeBenchmarks(const Options &opt) {
     std::vector<TestResult> results;
     auto contains = [&](const std::string &what) {
@@ -1966,6 +2108,28 @@ public:
                              "(HAVE_VECML not defined)."
                           << std::endl;
                 warned_vecml = true;
+              }
+#endif
+            }
+            // VecML Fast Index test
+            if (contains("vecml-fast-idx")) {
+#ifdef HAVE_VECML
+              auto fr = bench_local.testVecMLFastIdx(
+                  opt.vecml_base_path, opt.vecml_license_path,
+                  opt.mt_threads);
+              if (fr.build_time >= 0) {
+                fr.dim = dim_v;
+                fr.nb = nb_v;
+                fr.nq = nq_v;
+                fr.k = k_v;
+                results.push_back(fr);
+              }
+#else
+              static bool warned_vecml_fast = false;
+              if (!warned_vecml_fast) {
+                std::cerr << "VecML fast index requested but not available in this build (HAVE_VECML not defined)."
+                          << std::endl;
+                warned_vecml_fast = true;
               }
 #endif
             }
@@ -2533,7 +2697,7 @@ int main(int argc, char **argv) {
              "  --which STR                  comma list: "
              "all|hnsw_flat|hnsw_sq4|hnsw_sq8|hnsw_pq|hnsw_rabitq|ivf_flat|ivf_"
              "sq4|ivf_sq8|ivf_pq|"
-             "ivf_rbq|rbq_refine|ivf_rbq_refine|rabitq "
+             "ivf_rbq|rbq_refine|ivf_rbq_refine|rabitq|vecml|vecml-fast-idx "
              "(default all)\n"
              "  --out-csv PATH      output csv path (default "
              "hnsw_index_types_results.csv)\n"

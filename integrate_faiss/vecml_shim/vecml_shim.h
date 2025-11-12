@@ -26,4 +26,12 @@ void vecml_destroy(vecml_ctx_t ctx);
 // Returns a non-negative double on success, or -1.0 on error.
 double vecml_get_disk_mb(vecml_ctx_t ctx);
 
+// Enable building and searching a Fast Index (aka soil index) for the current context.
+// Must be called before adding data. Returns 0 on success, non-zero on error.
+// Parameters:
+// - shrink_rate: in (0,1], larger for slightly higher recall but slower indexing. Default 0.4 is recommended.
+// - max_num_samples: approximate number of total vectors; affects internal tuning. E.g., set to nb if known.
+// - num_threads: threads for parallel indexing.
+int vecml_enable_fast_index(vecml_ctx_t ctx, float shrink_rate, int max_num_samples, int num_threads);
+
 } // extern C
