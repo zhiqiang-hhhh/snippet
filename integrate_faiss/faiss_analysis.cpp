@@ -247,6 +247,7 @@ private:
   std::vector<float> queries;
   std::vector<faiss::idx_t> ground_truth;
   std::string save_data_dir; // directory to save test data
+  std::string dataset_name = "std-normal"; // data source name
 
 public:
   PQBenchmark(int dim = 128, int nb = 20000, int nq = 500, int k = 10,
@@ -282,6 +283,7 @@ public:
   int getNb() const { return nb; }
   int getNq() const { return nq; }
   int getK() const { return k; }
+  const std::string &getDatasetName() const { return dataset_name; }
 
   void generateData() {
     std::cout << "生成测试数据..." << std::endl;
@@ -594,6 +596,18 @@ public:
       delete[] xb;
       delete[] xq;
       delete[] gt;
+      // Set dataset name from directory leaf if present (e.g., "sift1M")
+      try {
+        std::filesystem::path p(dir);
+        if (!p.filename().empty()) {
+          dataset_name = p.filename().string();
+        } else {
+          dataset_name = "sift1M";
+        }
+      } catch (...) {
+        dataset_name = "sift1M";
+      }
+
       std::cout << "加载 SIFT1M 成功: dim=" << dim << ", nb=" << nb
                 << ", nq=" << nq << ", k=" << k << std::endl;
       return true;
@@ -605,6 +619,7 @@ public:
 
   struct TestResult {
     std::string method; // HNSW-Flat / HNSW-SQ / HNSW-PQ
+    std::string dataset; // "std-normal" or dataset name (e.g., sift1M)
     // Dataset level
     int dim = 0;
     int nb = 0;
@@ -2101,6 +2116,7 @@ public:
                       r.nb = bench_local.getNb();
                       r.nq = bench_local.getNq();
                       r.k = bench_local.getK();
+                      r.dataset = bench_local.getDatasetName();
                       results.push_back(r);
                     }
                   }
@@ -2113,6 +2129,7 @@ public:
                       r.nb = bench_local.getNb();
                       r.nq = bench_local.getNq();
                       r.k = bench_local.getK();
+                      r.dataset = bench_local.getDatasetName();
                       results.push_back(r);
                     }
                   }
@@ -2128,6 +2145,7 @@ public:
                             r.nq = bench_local.getNq();
                             r.k = bench_local.getK();
                             r.pq_train_ratio = tr_v;
+                            r.dataset = bench_local.getDatasetName();
                             results.push_back(r);
                           }
                         }
@@ -2145,6 +2163,7 @@ public:
                           r.nb = bench_local.getNb();
                           r.nq = bench_local.getNq();
                           r.k = bench_local.getK();
+                          r.dataset = bench_local.getDatasetName();
                           results.push_back(r);
                         }
                       }
@@ -2163,6 +2182,7 @@ public:
                     r.nb = bench_local.getNb();
                     r.nq = bench_local.getNq();
                     r.k = bench_local.getK();
+                    r.dataset = bench_local.getDatasetName();
                     results.push_back(r);
                   }
                 }
@@ -2175,6 +2195,7 @@ public:
                     r.nb = bench_local.getNb();
                     r.nq = bench_local.getNq();
                     r.k = bench_local.getK();
+                    r.dataset = bench_local.getDatasetName();
                     results.push_back(r);
                   }
                 }
@@ -2190,6 +2211,7 @@ public:
                           r.nq = bench_local.getNq();
                           r.k = bench_local.getK();
                           r.pq_train_ratio = tr_v;
+                          r.dataset = bench_local.getDatasetName();
                           results.push_back(r);
                         }
                       }
@@ -2207,6 +2229,7 @@ public:
                         r.nb = bench_local.getNb();
                         r.nq = bench_local.getNq();
                         r.k = bench_local.getK();
+                        r.dataset = bench_local.getDatasetName();
                         results.push_back(r);
                       }
                     }
@@ -2228,6 +2251,7 @@ public:
                             r.nb = bench_local.getNb();
                             r.nq = bench_local.getNq();
                             r.k = bench_local.getK();
+                            r.dataset = bench_local.getDatasetName();
                             results.push_back(r);
                           }
                         }
@@ -2248,6 +2272,7 @@ public:
                     r.nb = bench_local.getNb();
                     r.nq = bench_local.getNq();
                     r.k = bench_local.getK();
+                    r.dataset = bench_local.getDatasetName();
                     results.push_back(r);
                   }
                 }
@@ -2362,9 +2387,9 @@ public:
     }
 
     std::ostringstream header;
-    header << std::left << std::setw(18) << "method" << ' ' << std::setw(6)
-           << "dim" << ' ' << std::setw(8) << "nb" << ' ' << std::setw(6)
-           << "nq" << ' ' << std::setw(4) << "k" << ' ' << std::setw(8)
+    header << std::left << std::setw(18) << "method" << ' ' << std::setw(10)
+      << "dataset" << ' ' << std::setw(6) << "dim" << ' ' << std::setw(8)
+      << "nb" << ' ' << std::setw(6) << "nq" << ' ' << std::setw(4) << "k" << ' ' << std::setw(8)
            << "hnsw_M" << ' ' << std::setw(6) << "efC" << ' ' << std::setw(6)
            << "efS" << ' ' << std::setw(10) << "ivf_nlist" << ' '
            << std::setw(10) << "ivf_nprobe" << ' ' << std::setw(6) << "pq_m"
@@ -2387,10 +2412,11 @@ public:
     std::cout << std::string(header_line.size(), '-') << std::endl;
 
     for (const auto &r : results) {
-      std::ostringstream row;
-      row << std::left << std::setw(18) << r.method << ' ' << std::setw(6)
-          << r.dim << ' ' << std::setw(8) << r.nb << ' ' << std::setw(6) << r.nq
-          << ' ' << std::setw(4) << r.k << ' ' << std::setw(8) << r.hnsw_M
+    std::ostringstream row;
+    row << std::left << std::setw(18) << r.method << ' ' << std::setw(10)
+      << (r.dataset.empty() ? std::string("std-normal") : r.dataset) << ' '
+      << std::setw(6) << r.dim << ' ' << std::setw(8) << r.nb << ' ' << std::setw(6) << r.nq
+      << ' ' << std::setw(4) << r.k << ' ' << std::setw(8) << r.hnsw_M
           << ' ' << std::setw(6) << r.efC << ' ' << std::setw(6) << r.efS << ' '
           << std::setw(10) << r.ivf_nlist << ' ' << std::setw(10)
           << r.ivf_nprobe << ' ' << std::setw(6) << r.pq_m << ' '
@@ -2482,8 +2508,8 @@ public:
     auto csv_file = results_utils::openCsvAppend(path, existed);
     if (csv_file.is_open()) {
       if (!existed) {
-        csv_file
-            << "method,dim,nb,nq,k,hnsw_M,efC,efS,ivf_nlist,ivf_nprobe,pq_m,"
+    csv_file
+      << "method,dataset,dim,nb,nq,k,hnsw_M,efC,efS,ivf_nlist,ivf_nprobe,pq_m,"
                "pq_nbits,rabitq_qb,rabitq_centered,refine_k,refine_type,"
                "qtype,train_time,add_time,build_time,search_time_ms,recall_at_"
                "1,"
@@ -2494,8 +2520,9 @@ public:
       std::string run_time = results_utils::currentRunTimeString();
 
       for (const auto &r : results) {
-        csv_file << r.method << "," << r.dim << "," << r.nb << "," << r.nq
-                 << "," << r.k << "," << r.hnsw_M << "," << r.efC << ","
+  csv_file << r.method << "," << (r.dataset.empty() ? std::string("std-normal") : r.dataset) << ","
+     << r.dim << "," << r.nb << "," << r.nq
+     << "," << r.k << "," << r.hnsw_M << "," << r.efC << ","
                  << r.efS << "," << r.ivf_nlist << "," << r.ivf_nprobe << ","
                  << r.pq_m << "," << r.pq_nbits << "," << r.rabitq_qb << ","
                  << r.rabitq_centered << "," << r.refine_k << ","
@@ -2675,6 +2702,7 @@ static std::vector<PQBenchmark::TestResult> expandResultsWithMtVariants(
     PQBenchmark::TestResult mt = r;
     mt.method = r.method + kMtSuffix;
     mt.search_time_ms = r.mt_search_time_ms;
+    mt.dataset = r.dataset;
     if (r.mt_recall_1 > 0.0) {
       mt.recall_1 = r.mt_recall_1;
     }
