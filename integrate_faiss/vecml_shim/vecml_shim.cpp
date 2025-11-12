@@ -1,9 +1,13 @@
 #include "vecml_shim/vecml_shim.h"
+#include <chrono>
+#include <ctime>
 #include <filesystem>
+#include <iomanip>
 #include <iostream>
 #include <memory>
-#include <mutex>
+#include <sstream>
 #include <string>
+#include <thread>
 #include <vector>
 
 #ifdef __has_include
@@ -29,80 +33,88 @@ struct VecMLHandle {
   int fast_index_threads = 16;
 };
 
+// 轻量日志工具（默认开启，可通过 VECML_LOG=0 关闭）
+static bool vecml_log_enabled() {
+  const char *v = ::getenv("VECML_LOG");
+  if (!v)
+    return true; // 默认开
+  std::string s(v);
+  for (auto &c : s)
+    c = (char)std::tolower((unsigned char)c);
+  if (s == "0" || s == "false" || s == "off")
+    return false;
+  return true;
+}
+
+static std::string now_ts() {
+  using namespace std::chrono;
+  auto now = system_clock::now();
+  auto t = system_clock::to_time_t(now);
+  std::tm tm;
+#if defined(_WIN32)
+  localtime_s(&tm, &t);
+#else
+  localtime_r(&t, &tm);
+#endif
+  char buf[32];
+  std::strftime(buf, sizeof(buf), "%H:%M:%S", &tm);
+  auto ms = duration_cast<milliseconds>(now.time_since_epoch()) % 1000;
+  std::ostringstream oss;
+  oss << buf << "." << std::setw(3) << std::setfill('0') << ms.count();
+  return oss.str();
+}
+
+static void vlog(const std::string &msg) {
+  if (!vecml_log_enabled())
+    return;
+  std::ostringstream oss;
+  oss << "[" << now_ts() << "] [VecML] [tid=" << std::this_thread::get_id()
+      << "] " << msg << "\n";
+  std::cerr << oss.str();
+}
+
 extern "C" {
 
 vecml_ctx_t vecml_create(const char *base_path, const char *license_path, bool fast_index) {
   try {
-    // Global singleton for the underlying SDK to avoid re-init/destroy cycles
-    // that have shown instability when creating multiple contexts sequentially
-    // in one process. We reuse the same FluffyInterface across contexts.
-    static std::shared_ptr<fluffy::FluffyInterface> g_api;
-    static std::string g_base_path;
-    static std::string g_license_path;
-    static bool g_initialized = false;
-    static std::mutex g_mu;
-
-    std::lock_guard<std::mutex> lock(g_mu);
+    // Always clean the base path on each construction to keep behavior simple
+    try {
+      if (base_path && !std::string(base_path).empty()) {
+        std::error_code fec;
+        std::filesystem::remove_all(base_path, fec);
+        if (fec)
+          vlog(std::string("create: remove ") + base_path + " failed: " + fec.message());
+        else
+          vlog(std::string("create: removed base path ") + base_path);
+      } else {
+        vlog("create: base_path is null or empty");
+      }
+    } catch (const std::exception &e) {
+      vlog(std::string("create: exception while removing base path: ") + e.what());
+    }
 
     VecMLHandle *h = new VecMLHandle();
     h->base_path = base_path ? std::string(base_path) : std::string();
-
-    if (!g_api) {
-      // First time: clean up base path and create+init SDK
-      try {
-        if (base_path && !std::string(base_path).empty()) {
-          std::error_code fec;
-          std::filesystem::remove_all(base_path, fec);
-          if (fec) {
-            std::cerr << "vecml_create: failed to remove existing base path "
-                      << base_path << " error=" << fec.message() << "\n";
-          } else {
-            std::cerr << "vecml_create: removed existing base path "
-                      << base_path << "\n";
-          }
-        } else {
-          std::cerr << "vecml_create: base_path is null or empty\n";
-        }
-      } catch (const std::exception &e) {
-        std::cerr << "vecml_create: exception while removing base path: "
-                  << e.what() << "\n";
-      }
-
-      g_api = std::make_shared<fluffy::FluffyInterface>(
-          std::string(base_path), std::string(license_path));
-      g_base_path = base_path ? std::string(base_path) : std::string();
-      g_license_path = license_path ? std::string(license_path) : std::string();
-
-      fluffy::ErrorCode ec = g_api->init();
-      if (ec != fluffy::ErrorCode::Success) {
-        std::cerr << "vecml_create error: init failed: "
-                  << static_cast<int>(ec) << std::endl;
-        g_api.reset();
-        delete h;
-        return nullptr;
-      }
-      g_initialized = true;
-    } else {
-      // Reuse global SDK instance; warn on mismatched paths
-      if (base_path && !g_base_path.empty() && g_base_path != base_path) {
-        std::cerr << "vecml_create: warning: reusing global SDK with base_path="
-                  << g_base_path << ", ignored new base_path=" << base_path
-                  << "\n";
-      }
-      if (license_path && !g_license_path.empty() && g_license_path != license_path) {
-        std::cerr << "vecml_create: warning: reusing global SDK with license_path, ignoring new license\n";
-      }
-      std::cerr << "vecml_create: reusing global SDK instance\n";
+    vlog(std::string("create: init FluffyInterface, base=") + (base_path ? base_path : "") +
+         ", license=" + (license_path ? license_path : ""));
+    h->api = std::make_shared<fluffy::FluffyInterface>(
+        std::string(base_path), std::string(license_path));
+    // Initialize the SDK per-instance
+    fluffy::ErrorCode ec = h->api->init();
+    if (ec != fluffy::ErrorCode::Success) {
+      vlog(std::string("create: init failed ec=") + std::to_string((int)ec));
+      delete h;
+      return nullptr;
     }
 
-    h->api = g_api; // share the same underlying SDK
     // Choose a default index name. Actual attach happens in add_data.
     h->index_name = "test_index";
     // Configure fast-index preference for this handle; effective at add_data
     h->use_fast_index = fast_index;
+    vlog(std::string("create: success, use_fast_index=") + (fast_index ? "true" : "false"));
     return reinterpret_cast<vecml_ctx_t>(h);
   } catch (const std::exception &e) {
-    std::cerr << "vecml_create error: " << e.what() << std::endl;
+    vlog(std::string("create: exception: ") + e.what());
     return nullptr;
   }
 }
@@ -113,6 +125,9 @@ int vecml_add_data(vecml_ctx_t ctx, const float *data, int n, int dim,
     return -1;
   VecMLHandle *h = reinterpret_cast<VecMLHandle *>(ctx);
   try {
+    vlog(std::string("add: start n=") + std::to_string(n) + ", dim=" + std::to_string(dim) +
+         ", threads=" + std::to_string(h->fast_index_threads) +
+         (h->use_fast_index ? ", mode=fast-index" : ", mode=standard"));
     // Ensure an index exists with the correct dimension and distance type.
     // If no index was attached earlier (or vector dim is unknown), attach
     // one now using the provided `dim` and Euclidean distance so results
@@ -120,26 +135,28 @@ int vecml_add_data(vecml_ctx_t ctx, const float *data, int n, int dim,
     if (h->api->get_vector_dim() == 0) {
       // cast to int to match the SDK overload - dim_t is an SDK typedef
       fluffy::ErrorCode attach_ec = fluffy::ErrorCode::Success;
-      if (h->use_fast_index) {
+  if (h->use_fast_index) {
         // Use fast index (soil index)
         h->index_name = "fast_index";
         attach_ec = h->api->attach_soil_index(
             (int)dim, "dense", fluffy::DistanceFunctionType::Euclidean,
-            h->fast_shrink_rate, h->index_name, h->fast_max_samples,
-            h->fast_index_threads);
+    h->fast_shrink_rate, h->index_name, h->fast_max_samples,
+    (h->fast_index_threads > 0 ? h->fast_index_threads : 1));
       } else {
         attach_ec = h->api->attach_index(
             (int)dim, "dense", fluffy::DistanceFunctionType::Euclidean,
-            h->index_name, 16);
+    h->index_name, (h->fast_index_threads > 0 ? h->fast_index_threads : 1));
       }
       if (attach_ec != fluffy::ErrorCode::Success) {
-        std::cerr << "vecml_add_data warning: attach_index returned "
-                  << static_cast<int>(attach_ec) << std::endl;
+        vlog(std::string("add: attach index failed ec=") + std::to_string((int)attach_ec));
         // continue: add_data_batch may create index implicitly, but we tried
         // to make behavior explicit for correct metric/dim.
+      } else {
+        vlog(std::string("add: attached index '") + h->index_name + "' with dim=" + std::to_string(dim));
       }
     }
     // Prepare batch of (string_id, unique_ptr<Vector>) as the SDK expects
+    vlog("add: building vectors batch...");
     std::vector<std::pair<std::string, std::unique_ptr<fluffy::Vector>>> batch;
     batch.reserve(n);
     for (int i = 0; i < n; ++i) {
@@ -148,8 +165,7 @@ int vecml_add_data(vecml_ctx_t ctx, const float *data, int n, int dim,
       std::unique_ptr<fluffy::Vector> vec;
       fluffy::ErrorCode ec = h->api->build_vector_dense(embedding, vec);
       if (ec != fluffy::ErrorCode::Success || !vec) {
-        std::cerr << "vecml_add_data: build_vector_dense failed for index " << i
-                  << "\n";
+        vlog(std::string("add: build_vector_dense failed at ") + std::to_string(i));
         return -2;
       }
       long id = ids ? ids[i] : i;
@@ -162,28 +178,28 @@ int vecml_add_data(vecml_ctx_t ctx, const float *data, int n, int dim,
       batch.emplace_back(sid, std::move(vec));
     }
 
-    std::vector<fluffy::ErrorCode> ecs =
-        h->api->add_data_batch(batch, /*threads=*/16);
+  std::vector<fluffy::ErrorCode> ecs =
+    h->api->add_data_batch(batch, /*threads=*/(h->fast_index_threads > 0 ? h->fast_index_threads : 1));
+    vlog(std::string("add: add_data_batch done, items=") + std::to_string((int)batch.size()));
     // check results
     for (const auto &ec : ecs) {
       if (ec != fluffy::ErrorCode::Success) {
-        std::cerr << "vecml_add_data: add_data_batch returned error code "
-                  << static_cast<int>(ec) << std::endl;
+        vlog(std::string("add: add_data_batch returned error ec=") + std::to_string((int)ec));
         // continue but report failure
       }
     }
     // Flush to ensure data is persisted/visible for subsequent searches
     fluffy::ErrorCode flush_ec = h->api->flush();
     if (flush_ec != fluffy::ErrorCode::Success) {
-      std::cerr << "vecml_add_data: flush returned "
-                << static_cast<int>(flush_ec) << std::endl;
+      vlog(std::string("add: flush failed ec=") + std::to_string((int)flush_ec));
     } else {
-      std::cerr << "vecml_add_data: flush successful\n";
+      vlog("add: flush successful");
     }
+    vlog("add: end");
 
     return 0;
   } catch (const std::exception &e) {
-    std::cerr << "vecml_add_data error: " << e.what() << std::endl;
+    vlog(std::string("add: exception: ") + e.what());
     return -2;
   }
 }
@@ -194,6 +210,8 @@ int vecml_search(vecml_ctx_t ctx, const float *queries, int nq, int dim, int k,
     return -1;
   VecMLHandle *h = reinterpret_cast<VecMLHandle *>(ctx);
   try {
+    vlog(std::string("search: start nq=") + std::to_string(nq) + ", dim=" + std::to_string(dim) +
+         ", k=" + std::to_string(k) + ", index='" + h->index_name + "'");
     // Build query vectors and Query objects
     std::vector<fluffy::Query> queries_vec;
     std::vector<std::unique_ptr<fluffy::Vector>>
@@ -207,8 +225,7 @@ int vecml_search(vecml_ctx_t ctx, const float *queries, int nq, int dim, int k,
       std::unique_ptr<fluffy::Vector> vec;
       fluffy::ErrorCode ec = h->api->build_vector_dense(embedding, vec);
       if (ec != fluffy::ErrorCode::Success || !vec) {
-        std::cerr << "vecml_search: build_vector_dense failed for query " << i
-                  << "\n";
+        vlog(std::string("search: build_vector_dense failed for query ") + std::to_string(i));
         return -2;
       }
       fluffy::Query q;
@@ -232,8 +249,8 @@ int vecml_search(vecml_ctx_t ctx, const float *queries, int nq, int dim, int k,
       fluffy::ErrorCode sec =
           h->api->search(queries_vec[qi], qr, idx, 0.3f, 1.0f);
       if (sec != fluffy::ErrorCode::Success) {
-        std::cerr << "vecml_search: search() failed for query " << qi
-                  << " code=" << static_cast<int>(sec) << std::endl;
+        vlog(std::string("search: search() failed for query ") + std::to_string(qi) +
+             ", ec=" + std::to_string((int)sec));
         // mark no results for this query
         for (int t = 0; t < k; ++t)
           out_ids[(size_t)qi * k + t] = -1;
@@ -257,9 +274,10 @@ int vecml_search(vecml_ctx_t ctx, const float *queries, int nq, int dim, int k,
       for (size_t t = found; t < (size_t)k; ++t)
         out_ids[(size_t)qi * k + t] = -1;
     }
+    vlog("search: end");
     return 0;
   } catch (const std::exception &e) {
-    std::cerr << "vecml_search error: " << e.what() << std::endl;
+    vlog(std::string("search: exception: ") + e.what());
     return -3;
   }
 }
@@ -268,23 +286,25 @@ void vecml_destroy(vecml_ctx_t ctx) {
   if (!ctx)
     return;
   VecMLHandle *h = reinterpret_cast<VecMLHandle *>(ctx);
-  // Be defensive: ensure SDK destructor exceptions don't escape here.
-  try {
-    // Do not reset shared SDK here to avoid destabilizing subsequent tests;
-    // allow process exit to clean up the global instance.
-    h->api.reset();
-  } catch (const std::exception &e) {
-    std::cerr << "vecml_destroy: exception during api.reset(): " << e.what()
-              << std::endl;
-  } catch (...) {
-    std::cerr << "vecml_destroy: unknown exception during api.reset()" << std::endl;
-  }
+  // Intentionally avoid resetting/destroying the underlying SDK instance here
+  // to minimize the risk of destructor-related crashes in some environments.
+  // The process will clean up remaining instances on exit.
   delete h;
 }
 
 } // extern C
 
 extern "C" {
+
+void vecml_set_threads(vecml_ctx_t ctx, int threads) {
+  if (!ctx)
+    return;
+  VecMLHandle *h = reinterpret_cast<VecMLHandle *>(ctx);
+  if (threads <= 0)
+    threads = 1;
+  h->fast_index_threads = threads;
+  vlog(std::string("set_threads: ") + std::to_string(threads));
+}
 
 double vecml_get_disk_mb(vecml_ctx_t ctx) {
   if (!ctx)
@@ -332,10 +352,14 @@ int vecml_enable_fast_index(vecml_ctx_t ctx, float shrink_rate,
     max_num_samples = 100000;
   if (num_threads <= 0)
     num_threads = 1;
+
   h->use_fast_index = true;
   h->fast_shrink_rate = shrink_rate;
   h->fast_max_samples = max_num_samples;
   h->fast_index_threads = num_threads;
+  vlog(std::string("enable_fast_index: shrink=") + std::to_string(shrink_rate) +
+       ", max_samples=" + std::to_string(max_num_samples) +
+       ", threads=" + std::to_string(num_threads));
   return 0;
 }
 

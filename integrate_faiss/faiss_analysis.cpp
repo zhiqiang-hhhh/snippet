@@ -43,6 +43,40 @@
 #include "cli_utils.h"
 #include "util/results_utils.h"
 
+// --- Lightweight step logger (default on; set FAISS_ANALYSIS_LOG=0 to disable) ---
+static bool analysis_log_enabled() {
+  const char *v = ::getenv("FAISS_ANALYSIS_LOG");
+  if (!v)
+    return true;
+  std::string s(v);
+  for (auto &c : s)
+    c = (char)std::tolower((unsigned char)c);
+  return !(s == "0" || s == "false" || s == "off");
+}
+static std::string now_ts_simple() {
+  using namespace std::chrono;
+  auto now = system_clock::now();
+  auto t = system_clock::to_time_t(now);
+  std::tm tm;
+#if defined(_WIN32)
+  localtime_s(&tm, &t);
+#else
+  localtime_r(&t, &tm);
+#endif
+  char buf[32];
+  std::strftime(buf, sizeof(buf), "%H:%M:%S", &tm);
+  auto ms = duration_cast<milliseconds>(now.time_since_epoch()) % 1000;
+  char out[48];
+  snprintf(out, sizeof(out), "%s.%03lld", buf, (long long)ms.count());
+  return std::string(out);
+}
+static void log_step(const std::string &tag, const std::string &msg) {
+  if (!analysis_log_enabled())
+    return;
+  std::cerr << "[" << now_ts_simple() << "] [STEP] " << tag << ": " << msg
+            << "\n";
+}
+
 // 通过序列化来估算索引内存占用：写到临时文件，取文件大小（MB）
 static double measureIndexSerializedSize(faiss::Index *index) {
   if (!index)
@@ -233,6 +267,7 @@ struct Options {
   std::string vecml_base_path =
       ""; // path to vecml SDK dir (contains include/lib)
   std::string vecml_license_path = "license.txt";
+  int vecml_threads = 16; // threads for vecml attach/add operations
 
   // Whether to build transposed centroids for PQ (optimization)
   bool transpose_centroid = false;
@@ -1732,7 +1767,8 @@ public:
 #ifdef HAVE_VECML
   // VecML test using the C shim (vecml_shim)
   TestResult testVecML(const std::string &base_path,
-                       const std::string &license_path, int mt_threads_option) {
+                       const std::string &license_path, int mt_threads_option,
+                       int vec_threads_option) {
     TestResult r{};
     r.method = "VecML";
     r.dim = dim;
@@ -1740,15 +1776,23 @@ public:
     r.nq = nq;
     r.k = k;
     // create ctx
-  vecml_ctx_t ctx = vecml_create(base_path.c_str(), license_path.c_str(), /*fast_index=*/false);
+    log_step("VecML", std::string("create context, base=") + base_path +
+                           ", license=" + license_path +
+                           ", fast_index=false");
+    vecml_ctx_t ctx = vecml_create(base_path.c_str(), license_path.c_str(), /*fast_index=*/false);
     if (!ctx) {
       std::cerr << "VecML: failed to create context" << std::endl;
       r.build_time = -1;
       return r;
     }
+    // Configure threads for index attach and add operations
+    vecml_set_threads(ctx, vec_threads_option);
+    log_step("VecML", std::string("set_threads=") + std::to_string(vec_threads_option));
     // VecML does not have a separate train phase. Measure add_time and set
     // build_time = add_time to reflect that "build" is just adding data.
     try {
+      log_step("VecML", std::string("add_data start nb=") + std::to_string(nb) +
+                             ", dim=" + std::to_string(dim));
       auto t_add0 = std::chrono::high_resolution_clock::now();
       int add_ret = vecml_add_data(ctx, database.data(), nb, dim, nullptr);
       auto t_add1 = std::chrono::high_resolution_clock::now();
@@ -1759,10 +1803,14 @@ public:
         return r;
       }
       r.add_time = std::chrono::duration<double>(t_add1 - t_add0).count();
+      log_step("VecML", std::string("add_data done, time=") +
+                             std::to_string(r.add_time) + " s");
       r.train_time = 0.0; // no train step in VecML
       r.build_time = r.add_time;
 
       // Search timing
+      log_step("VecML", std::string("search start nq=") + std::to_string(nq) +
+                             ", k=" + std::to_string(k));
       std::vector<long> out_ids((size_t)nq * k, -1);
       auto t_s0 = std::chrono::high_resolution_clock::now();
       int sret = vecml_search(ctx, queries.data(), nq, dim, k, out_ids.data());
@@ -1778,6 +1826,8 @@ public:
         r.search_time_ms = (search_sec / (double)nq) * 1000.0;
       else
         r.search_time_ms = 0.0;
+      log_step("VecML", std::string("search done, time=") +
+                             std::to_string(r.search_time_ms) + " ms/query");
 
       // convert to faiss labels
       std::vector<faiss::idx_t> labels((size_t)nq * k);
@@ -1881,6 +1931,7 @@ public:
         }
       }
 
+      log_step("VecML", "destroy context");
       vecml_destroy(ctx);
 
       double final_disk_mb = computeDirectorySizeMB(base_path);
@@ -1891,8 +1942,8 @@ public:
         if (final_disk_mb > 0.0) {
           r.compression_ratio = raw_mb / final_disk_mb;
         }
-        std::cerr << "vecml_destroy: persisted disk usage: " << final_disk_mb
-                  << " MB\n";
+        log_step("VecML", std::string("persisted disk usage=") +
+                               std::to_string(final_disk_mb) + " MB");
       }
 
       return r;
@@ -1910,31 +1961,44 @@ public:
   // VecML Fast Index test (attach_soil_index) using the C shim
   TestResult testVecMLFastIdx(const std::string &base_path,
                               const std::string &license_path,
-                              int mt_threads_option) {
+                              int mt_threads_option,
+                              int vec_threads_option) {
     TestResult r{};
     r.method = "VecML-Fast-Idx";
     r.dim = dim;
     r.nb = nb;
     r.nq = nq;
     r.k = k;
-  vecml_ctx_t ctx = vecml_create(base_path.c_str(), license_path.c_str(), /*fast_index=*/true);
+    log_step("VecML-Fast-Idx", std::string("create context, base=") + base_path +
+                                   ", license=" + license_path +
+                                   ", fast_index=true");
+    vecml_ctx_t ctx = vecml_create(base_path.c_str(), license_path.c_str(), /*fast_index=*/true);
     if (!ctx) {
       std::cerr << "VecML-Fast-Idx: failed to create context" << std::endl;
       r.build_time = -1;
       return r;
     }
-    // Enable fast index before adding data. Use sensible defaults.
-    int index_threads = mt_threads_option > 0 ? mt_threads_option : 8;
+    // Configure threads and enable fast index before adding data
+    vecml_set_threads(ctx, vec_threads_option);
+    log_step("VecML-Fast-Idx",
+             std::string("set_threads=") + std::to_string(vec_threads_option));
     if (vecml_enable_fast_index(ctx, /*shrink_rate=*/0.4f,
                                 /*max_num_samples=*/std::max(nb, 100000),
-                                index_threads) != 0) {
+                                (vec_threads_option > 0 ? vec_threads_option : 8)) != 0) {
       std::cerr << "VecML-Fast-Idx: enable_fast_index failed" << std::endl;
       vecml_destroy(ctx);
       r.build_time = -1;
       return r;
     }
+    log_step("VecML-Fast-Idx",
+             std::string("enable_fast_index shrink=0.4 max_samples=") +
+                 std::to_string(std::max(nb, 100000)) +
+                 ", threads=" + std::to_string(vec_threads_option > 0 ? vec_threads_option : 8));
 
     try {
+      log_step("VecML-Fast-Idx", std::string("add_data start nb=") +
+                                       std::to_string(nb) + ", dim=" +
+                                       std::to_string(dim));
       auto t_add0 = std::chrono::high_resolution_clock::now();
       int add_ret = vecml_add_data(ctx, database.data(), nb, dim, nullptr);
       auto t_add1 = std::chrono::high_resolution_clock::now();
@@ -1946,10 +2010,16 @@ public:
         return r;
       }
       r.add_time = std::chrono::duration<double>(t_add1 - t_add0).count();
+      log_step("VecML-Fast-Idx",
+               std::string("add_data done, time=") +
+                   std::to_string(r.add_time) + " s");
       r.train_time = 0.0;
       r.build_time = r.add_time;
 
       std::vector<long> out_ids((size_t)nq * k, -1);
+      log_step("VecML-Fast-Idx", std::string("search start nq=") +
+                                       std::to_string(nq) + ", k=" +
+                                       std::to_string(k));
       auto t_s0 = std::chrono::high_resolution_clock::now();
       int sret = vecml_search(ctx, queries.data(), nq, dim, k, out_ids.data());
       auto t_s1 = std::chrono::high_resolution_clock::now();
@@ -1961,6 +2031,9 @@ public:
       }
       double search_sec = std::chrono::duration<double>(t_s1 - t_s0).count();
       r.search_time_ms = nq > 0 ? (search_sec / (double)nq) * 1000.0 : 0.0;
+      log_step("VecML-Fast-Idx",
+               std::string("search done, time=") +
+                   std::to_string(r.search_time_ms) + " ms/query");
 
       std::vector<faiss::idx_t> labels((size_t)nq * k);
       for (int i = 0; i < nq * k; ++i) {
@@ -2023,6 +2096,7 @@ public:
         }
       }
 
+      log_step("VecML-Fast-Idx", "destroy context");
       vecml_destroy(ctx);
       double final_disk_mb = computeDirectorySizeMB(base_path);
       if (final_disk_mb >= 0.0) {
@@ -2032,6 +2106,9 @@ public:
         if (final_disk_mb > 0.0) {
           r.compression_ratio = raw_mb / final_disk_mb;
         }
+        log_step("VecML-Fast-Idx",
+                 std::string("persisted disk usage=") +
+                     std::to_string(final_disk_mb) + " MB");
       }
       return r;
     } catch (const std::exception &e) {
@@ -2311,8 +2388,9 @@ public:
 #// Only run VecML when explicitly requested via --which=vecml.
             if (contains("vecml")) {
 #ifdef HAVE_VECML
-              auto vr = bench_local.testVecML(
-                  opt.vecml_base_path, opt.vecml_license_path, opt.mt_threads);
+        auto vr = bench_local.testVecML(
+          opt.vecml_base_path, opt.vecml_license_path, opt.mt_threads,
+          opt.vecml_threads);
               if (vr.build_time >= 0) {
                 vr.dim = bench_local.getDim();
                 vr.nb = bench_local.getNb();
@@ -2337,10 +2415,11 @@ public:
 #ifdef HAVE_VECML
         // Use a separate subdirectory for fast-idx to avoid reusing
         // files from the standard VecML run when both are requested.
-        auto fr = bench_local.testVecMLFastIdx(
+  auto fr = bench_local.testVecMLFastIdx(
           opt.vecml_base_path.empty() ? std::string("") : (opt.vecml_base_path + "/fast_idx"),
           opt.vecml_license_path,
-                  opt.mt_threads);
+      opt.mt_threads,
+      opt.vecml_threads);
               if (fr.build_time >= 0) {
                 fr.dim = bench_local.getDim();
                 fr.nb = bench_local.getNb();
@@ -2709,10 +2788,11 @@ struct IVFRaBitQRefineTest : public IndexTest {
 struct VecMLTestWrap : public IndexTest {
   std::string base_path, license_path;
   int mt_threads;
-  VecMLTestWrap(const std::string &b, const std::string &l, int mt)
-      : base_path(b), license_path(l), mt_threads(mt) {}
+  int vec_threads;
+  VecMLTestWrap(const std::string &b, const std::string &l, int mt, int vt)
+      : base_path(b), license_path(l), mt_threads(mt), vec_threads(vt) {}
   PQBenchmark::TestResult execute(PQBenchmark &bench) override {
-    return bench.testVecML(base_path, license_path, mt_threads);
+    return bench.testVecML(base_path, license_path, mt_threads, vec_threads);
   }
 };
 #endif
@@ -2884,6 +2964,14 @@ int main(int argc, char **argv) {
       nexts(opt.vecml_base_path);
     } else if (a == "--vecml-license") {
       nexts(opt.vecml_license_path);
+    } else if (a == "--vecml-threads") {
+      int v = 16;
+      auto next_int = [&](int &dst) {
+        if (i + 1 < argc) dst = std::stoi(argv[++i]);
+      };
+      next_int(v);
+      if (v <= 0) v = 16;
+      opt.vecml_threads = v;
     } else if (a == "--sift1m-dir") {
       nexts(opt.sift1m_dir);
       if (!opt.sift1m_dir.empty()) opt.use_sift1m = true;
@@ -2955,6 +3043,7 @@ int main(int argc, char **argv) {
              "(contains lib and headers)\n"
              "  --vecml-license PATH           path to VecML license file "
              "(optional, default: license.txt)\n";
+  std::cout << "  --vecml-threads INT         threads used by VecML for index attach/add (default 16)\n";
   std::cout << "  --sift1m-dir PATH           load SIFT1M dataset from PATH (expects sift_base.fvecs, sift_query.fvecs, sift_groundtruth.ivecs)\n";
   std::cout << "  --sift1m-nb-limit INT       optional: limit number of base vectors to first INT (default off)\n";
   std::cout << "  --sift1m-nq-limit INT       optional: limit number of queries to first INT (default off)\n";
