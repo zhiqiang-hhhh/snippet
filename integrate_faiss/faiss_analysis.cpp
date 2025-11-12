@@ -6,10 +6,10 @@
 #include <cctype>
 #include <chrono>
 #include <cmath>
-#include <cstdlib>
-#include <ctime>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
+#include <ctime>
 #include <faiss/IndexFlat.h>
 #include <faiss/IndexHNSW.h>
 #include <faiss/IndexIVF.h>
@@ -42,6 +42,41 @@
 #endif
 #include "cli_utils.h"
 #include "util/results_utils.h"
+
+// --- Lightweight step logger (default on; set FAISS_ANALYSIS_LOG=0 to disable)
+// ---
+static bool analysis_log_enabled() {
+  const char *v = ::getenv("FAISS_ANALYSIS_LOG");
+  if (!v)
+    return true;
+  std::string s(v);
+  for (auto &c : s)
+    c = (char)std::tolower((unsigned char)c);
+  return !(s == "0" || s == "false" || s == "off");
+}
+static std::string now_ts_simple() {
+  using namespace std::chrono;
+  auto now = system_clock::now();
+  auto t = system_clock::to_time_t(now);
+  std::tm tm;
+#if defined(_WIN32)
+  localtime_s(&tm, &t);
+#else
+  localtime_r(&t, &tm);
+#endif
+  char buf[32];
+  std::strftime(buf, sizeof(buf), "%H:%M:%S", &tm);
+  auto ms = duration_cast<milliseconds>(now.time_since_epoch()) % 1000;
+  char out[48];
+  snprintf(out, sizeof(out), "%s.%03lld", buf, (long long)ms.count());
+  return std::string(out);
+}
+static void log_step(const std::string &tag, const std::string &msg) {
+  if (!analysis_log_enabled())
+    return;
+  std::cerr << "[" << now_ts_simple() << "] [STEP] " << tag << ": " << msg
+            << "\n";
+}
 
 // 通过序列化来估算索引内存占用：写到临时文件，取文件大小（MB）
 static double measureIndexSerializedSize(faiss::Index *index) {
@@ -102,8 +137,7 @@ static double computeDirectorySizeMB(const std::string &path) {
 }
 
 // ---- SIFT1M helpers (fvecs/ivecs readers) ----
-static float *fvecs_read_all(const char *fname, size_t *d_out,
-                             size_t *n_out) {
+static float *fvecs_read_all(const char *fname, size_t *d_out, size_t *n_out) {
   FILE *f = fopen(fname, "rb");
   if (!f) {
     std::perror("fopen");
@@ -194,6 +228,10 @@ struct Options {
   // by dim, nb, nq, k options (nb/nq/k act as upper bounds if set).
   bool use_sift1m = false;
   std::string sift1m_dir; // e.g., "sift1M"
+  // Optional dataset limiting/override when using SIFT1M (defaults: off)
+  int sift_nb_limit = -1;   // if >0, limit number of base vectors
+  int sift_nq_limit = -1;   // if >0, limit number of queries
+  int sift_k_override = -1; // if >0, override K per query (cap by GT)
 
   // IVF parameters (for IVF-Flat / IVF-PQ / IVF-SQ)
   int ivf_nlist = 256;
@@ -229,6 +267,7 @@ struct Options {
   std::string vecml_base_path =
       ""; // path to vecml SDK dir (contains include/lib)
   std::string vecml_license_path = "license.txt";
+  int vecml_threads = 16; // threads for vecml attach/add operations
 
   // Whether to build transposed centroids for PQ (optimization)
   bool transpose_centroid = false;
@@ -246,35 +285,37 @@ private:
   std::vector<float> database;
   std::vector<float> queries;
   std::vector<faiss::idx_t> ground_truth;
-  std::string save_data_dir; // directory to save test data
+  std::string save_data_dir;               // directory to save test data
   std::string dataset_name = "std-normal"; // data source name
 
 public:
   PQBenchmark(int dim = 128, int nb = 20000, int nq = 500, int k = 10,
               bool transpose_centroid = false, const std::string &data_dir = "",
-              const std::string &load_dir = "", int mt_threads_option = 0)
+              const std::string &load_dir = "", int mt_threads_option = 0,
+              bool skip_init = false)
       : dim(dim), nb(nb), nq(nq), k(k), transpose_centroid(transpose_centroid),
         mt_threads(mt_threads_option), save_data_dir(data_dir) {
     std::cout << "=== HNSW Index Types Benchmark (C++) ===" << std::endl;
     std::cout << "配置: dim=" << dim << ", nb=" << nb << ", nq=" << nq
               << ", k=" << k << std::endl;
-
-    if (!load_dir.empty()) {
-      std::cout << "从 " << load_dir << " 加载测试数据..." << std::endl;
-      if (loadTestData(load_dir)) {
-        std::cout << "数据加载成功!" << std::endl;
+    if (!skip_init) {
+      if (!load_dir.empty()) {
+        std::cout << "从 " << load_dir << " 加载测试数据..." << std::endl;
+        if (loadTestData(load_dir)) {
+          std::cout << "数据加载成功!" << std::endl;
+        } else {
+          std::cout << "数据加载失败，生成新数据..." << std::endl;
+          generateData();
+          computeGroundTruth();
+        }
       } else {
-        std::cout << "数据加载失败，生成新数据..." << std::endl;
         generateData();
         computeGroundTruth();
       }
-    } else {
-      generateData();
-      computeGroundTruth();
-    }
 
-    if (!save_data_dir.empty()) {
-      saveTestData();
+      if (!save_data_dir.empty()) {
+        saveTestData();
+      }
     }
   }
 
@@ -567,7 +608,8 @@ public:
         delete[] xb;
         delete[] xq;
         delete[] gt;
-        std::cerr << "SIFT1M: invalid limits after applying nb/nq/k" << std::endl;
+        std::cerr << "SIFT1M: invalid limits after applying nb/nq/k"
+                  << std::endl;
         return false;
       }
 
@@ -578,12 +620,12 @@ public:
       database.assign(nb * dim, 0.0f);
       queries.assign(nq * dim, 0.0f);
       for (size_t i = 0; i < use_nb; ++i) {
-        std::memcpy(database.data() + i * (size_t)dim,
-                    xb + i * (size_t)dim, (size_t)dim * sizeof(float));
+        std::memcpy(database.data() + i * (size_t)dim, xb + i * (size_t)dim,
+                    (size_t)dim * sizeof(float));
       }
       for (size_t i = 0; i < use_nq; ++i) {
-        std::memcpy(queries.data() + i * (size_t)dim,
-                    xq + i * (size_t)dim, (size_t)dim * sizeof(float));
+        std::memcpy(queries.data() + i * (size_t)dim, xq + i * (size_t)dim,
+                    (size_t)dim * sizeof(float));
       }
       ground_truth.assign(nq * k, -1);
       for (size_t qi = 0; qi < use_nq; ++qi) {
@@ -618,7 +660,7 @@ public:
   }
 
   struct TestResult {
-    std::string method; // HNSW-Flat / HNSW-SQ / HNSW-PQ
+    std::string method;  // HNSW-Flat / HNSW-SQ / HNSW-PQ
     std::string dataset; // "std-normal" or dataset name (e.g., sift1M)
     // Dataset level
     int dim = 0;
@@ -680,6 +722,30 @@ public:
     }
 
     return recall_sum / nq;
+  }
+
+  // Standard 1-NN recall@K: fraction of queries where the true nearest
+  // neighbor (ground_truth's first entry per query) appears in the top-K
+  // predicted labels. Monotonically non-decreasing with K and within [0,1].
+  double computeRecall1NN(const std::vector<faiss::idx_t> &pred_labels,
+                          int top_k) {
+    if (nq <= 0 || k <= 0 || top_k <= 0)
+      return 0.0;
+    int K = std::min(top_k, k);
+    int hit_count = 0;
+    for (int i = 0; i < nq; ++i) {
+      faiss::idx_t true_nn = ground_truth[i * k + 0];
+      bool hit = false;
+      for (int j = 0; j < K; ++j) {
+        if (pred_labels[i * k + j] == true_nn) {
+          hit = true;
+          break;
+        }
+      }
+      if (hit)
+        ++hit_count;
+    }
+    return nq > 0 ? (double)hit_count / (double)nq : 0.0;
   }
 
   struct MultiThreadResult {
@@ -771,8 +837,9 @@ public:
   }
 
   void applyMultiThreadMetrics(const std::string &method_name, TestResult &r,
-                               const std::vector<faiss::idx_t> &baseline_labels,
-                               const MultiThreadResult &mt) {
+                               const std::vector<faiss::idx_t> *baseline_labels,
+                               const MultiThreadResult &mt,
+                               bool adopt_as_primary_if_no_baseline) {
     r.has_mt = true;
     r.mt_threads = mt.threads;
     r.mt_search_time_ms = mt.ms_per_query;
@@ -782,15 +849,26 @@ public:
     r.mt_recall_5 = (recall_at_5 > 0)
                         ? computeRecall(mt.labels, ground_truth, recall_at_5)
                         : 0.0;
-    bool match = (mt.labels == baseline_labels);
+    bool has_baseline = (baseline_labels && !baseline_labels->empty());
+    bool match = false;
+    if (has_baseline) {
+      match = (mt.labels == *baseline_labels);
+    }
     std::cout << std::fixed << std::setprecision(3)
               << "    [MT] threads=" << r.mt_threads
               << ", search=" << r.mt_search_time_ms << " ms/query, recall@" << k
               << "=" << r.mt_recall_k << std::endl;
-    if (!match) {
+    if (has_baseline && !match) {
       std::cout << "    [WARN] " << method_name
                 << " multi-thread results differ from single-thread baseline"
                 << std::endl;
+    }
+    if (!has_baseline && adopt_as_primary_if_no_baseline) {
+      // 没有基线时，将多线程结果作为主结果，避免重复单线程search
+      r.search_time_ms = r.mt_search_time_ms;
+      r.recall_k = r.mt_recall_k;
+      r.recall_1 = r.mt_recall_1;
+      r.recall_5 = r.mt_recall_5;
     }
   }
 
@@ -840,40 +918,54 @@ public:
               << ", efS=" << efS << ")..." << std::endl;
     TestResult r{};
     r.method = "HNSW-Flat";
+    std::string tag = r.method;
     r.hnsw_M = hnsw_m;
     r.efC = efC;
     r.efS = efS;
     try {
+      log_step(tag, "start");
       faiss::IndexHNSWFlat index(dim, hnsw_m);
       index.hnsw.efConstruction = efC;
       // no train for HNSW-Flat
       r.train_time = 0.0;
+      log_step(tag, std::string("add start nb=") + std::to_string(nb) +
+                        ", dim=" + std::to_string(dim));
       auto t_add0 = std::chrono::high_resolution_clock::now();
       index.add(nb, database.data());
       auto t_add1 = std::chrono::high_resolution_clock::now();
       r.add_time = std::chrono::duration<double>(t_add1 - t_add0).count();
       r.build_time = r.train_time + r.add_time;
+      log_step(tag, std::string("add done, time=") +
+                        std::to_string(r.add_time) + " s");
       std::cout << std::fixed << std::setprecision(3)
                 << "    训练(train)= " << r.train_time
                 << " s, 建索引(add)= " << r.add_time
                 << " s, 总构建= " << r.build_time << " s" << std::endl;
 
       index.hnsw.efSearch = efS;
-      std::vector<float> distances(nq * k);
-      std::vector<faiss::idx_t> labels(nq * k);
+      std::vector<float> distances;
+      std::vector<faiss::idx_t> labels;
+      // Always run single-thread baseline to populate serial metrics
+      distances.resize((size_t)nq * k);
+      labels.resize((size_t)nq * k);
+      log_step(tag, std::string("search start nq=") + std::to_string(nq) +
+                        ", k=" + std::to_string(k));
       auto t0 = std::chrono::high_resolution_clock::now();
       index.search(nq, queries.data(), k, distances.data(), labels.data());
       auto t1 = std::chrono::high_resolution_clock::now();
       r.search_time_ms =
           std::chrono::duration<double, std::milli>(t1 - t0).count() / nq;
-
-      r.recall_1 = computeRecall(labels, ground_truth, 1);
-      r.recall_5 = computeRecall(labels, ground_truth, 5);
-      r.recall_k = computeRecall(labels, ground_truth, k);
+      log_step(tag, std::string("search done, time=") +
+                        std::to_string(r.search_time_ms) + " ms/query");
+      r.recall_1 = computeRecall1NN(labels, 1);
+      r.recall_5 = computeRecall1NN(labels, 5);
+      r.recall_k = computeRecall1NN(labels, k);
 
       // Serialize index to a temporary file to measure real memory footprint
       // (including graph + codes)
       r.mbs_on_disk = measureIndexSerializedSize(&index);
+      log_step(tag, std::string("serialized size=") +
+                        std::to_string(r.mbs_on_disk) + " MB");
       // For flat, compression ratio = original (dim*4) /
       // (serialized_size_per_vector)
       if (nb > 0) {
@@ -894,7 +986,8 @@ public:
           },
           mt_result);
       if (mt_ok) {
-        applyMultiThreadMetrics(r.method, r, labels, mt_result);
+        applyMultiThreadMetrics(r.method, r, &labels, mt_result,
+                                /*adopt_as_primary_if_no_baseline=*/false);
       }
     } catch (const std::exception &e) {
       std::cerr << "    错误: " << e.what() << std::endl;
@@ -910,19 +1003,25 @@ public:
               << ", efC=" << efC << ", efS=" << efS << ")..." << std::endl;
     TestResult r{};
     r.method = "HNSW-SQ" + std::to_string(getQTypeBits(qtype));
+    std::string tag = r.method;
     r.hnsw_M = hnsw_m;
     r.efC = efC;
     r.efS = efS;
     r.qtype = qtype;
     try {
+      log_step(tag, "start");
       faiss::IndexHNSWSQ index(dim,
                                (faiss::ScalarQuantizer::QuantizerType)qtype,
                                hnsw_m, faiss::METRIC_L2);
       index.hnsw.efConstruction = efC;
+      log_step(tag, std::string("train start nb=") + std::to_string(nb));
       auto t0 = std::chrono::high_resolution_clock::now();
       index.train(nb, database.data());
       auto t1 = std::chrono::high_resolution_clock::now();
       r.train_time = std::chrono::duration<double>(t1 - t0).count();
+      log_step(tag, std::string("train done, time=") +
+                        std::to_string(r.train_time) + " s");
+      log_step(tag, std::string("add start nb=") + std::to_string(nb));
       auto t2 = std::chrono::high_resolution_clock::now();
       index.add(nb, database.data());
       auto t3 = std::chrono::high_resolution_clock::now();
@@ -934,17 +1033,24 @@ public:
                 << " s, 总构建= " << r.build_time << " s" << std::endl;
 
       index.hnsw.efSearch = efS;
-      std::vector<float> distances(nq * k);
-      std::vector<faiss::idx_t> labels(nq * k);
+      std::vector<float> distances;
+      std::vector<faiss::idx_t> labels;
+      // Always run baseline
+      distances.resize((size_t)nq * k);
+      labels.resize((size_t)nq * k);
+      log_step(tag, std::string("search start nq=") + std::to_string(nq) +
+                        ", k=" + std::to_string(k));
       t0 = std::chrono::high_resolution_clock::now();
       index.search(nq, queries.data(), k, distances.data(), labels.data());
       t1 = std::chrono::high_resolution_clock::now();
       r.search_time_ms =
           std::chrono::duration<double, std::milli>(t1 - t0).count() / nq;
+      log_step(tag, std::string("search done, time=") +
+                        std::to_string(r.search_time_ms) + " ms/query");
 
-      r.recall_1 = computeRecall(labels, ground_truth, 1);
-      r.recall_5 = computeRecall(labels, ground_truth, 5);
-      r.recall_k = computeRecall(labels, ground_truth, k);
+      r.recall_1 = computeRecall1NN(labels, 1);
+      r.recall_5 = computeRecall1NN(labels, 5);
+      r.recall_k = computeRecall1NN(labels, k);
 
       int bits = 8;
       using QT = faiss::ScalarQuantizer::QuantizerType;
@@ -982,7 +1088,8 @@ public:
           },
           mt_result);
       if (mt_ok) {
-        applyMultiThreadMetrics(r.method, r, labels, mt_result);
+        applyMultiThreadMetrics(r.method, r, &labels, mt_result,
+                                /*adopt_as_primary_if_no_baseline=*/false);
       }
     } catch (const std::exception &e) {
       std::cerr << "    错误: " << e.what() << std::endl;
@@ -999,6 +1106,7 @@ public:
               << ", tr=" << train_ratio << ")..." << std::endl;
     TestResult r{};
     r.method = "HNSW-PQ";
+    std::string tag = r.method;
     r.hnsw_M = hnsw_m;
     r.efC = efC;
     r.efS = efS;
@@ -1006,6 +1114,7 @@ public:
     r.pq_nbits = pq_nbits;
     r.pq_train_ratio = train_ratio;
     try {
+      log_step(tag, "start");
       if (dim % pq_m != 0) {
         std::cout << "    跳过：dim=" << dim << " 不能被 m=" << pq_m << " 整除"
                   << std::endl;
@@ -1027,6 +1136,7 @@ public:
         std::cout << "    使用训练样本: " << train_n << "/" << nb
                   << " (ratio=" << oss.str() << ")" << std::endl;
       }
+      log_step(tag, std::string("train start n=") + std::to_string(train_n));
       auto t0 = std::chrono::high_resolution_clock::now();
       index.train(train_n, database.data());
       if (transpose_centroid) {
@@ -1037,30 +1147,44 @@ public:
       }
       auto t1 = std::chrono::high_resolution_clock::now();
       r.train_time = std::chrono::duration<double>(t1 - t0).count();
+      log_step(tag, std::string("train done, time=") +
+                        std::to_string(r.train_time) + " s");
+      log_step(tag, std::string("add start nb=") + std::to_string(nb));
       auto t2 = std::chrono::high_resolution_clock::now();
       index.add(nb, database.data());
       auto t3 = std::chrono::high_resolution_clock::now();
       r.add_time = std::chrono::duration<double>(t3 - t2).count();
       r.build_time = r.train_time + r.add_time;
+      log_step(tag, std::string("add done, time=") +
+                        std::to_string(r.add_time) + " s");
       std::cout << std::fixed << std::setprecision(3)
                 << "    训练(train)= " << r.train_time
                 << " s, 建索引(add)= " << r.add_time
                 << " s, 总构建= " << r.build_time << " s" << std::endl;
 
       index.hnsw.efSearch = efS;
-      std::vector<float> distances(nq * k);
-      std::vector<faiss::idx_t> labels(nq * k);
+      std::vector<float> distances;
+      std::vector<faiss::idx_t> labels;
+      // Always run baseline
+      distances.resize((size_t)nq * k);
+      labels.resize((size_t)nq * k);
+      log_step(tag, std::string("search start nq=") + std::to_string(nq) +
+                        ", k=" + std::to_string(k));
       t0 = std::chrono::high_resolution_clock::now();
       index.search(nq, queries.data(), k, distances.data(), labels.data());
       t1 = std::chrono::high_resolution_clock::now();
       r.search_time_ms =
           std::chrono::duration<double, std::milli>(t1 - t0).count() / nq;
+      log_step(tag, std::string("search done, time=") +
+                        std::to_string(r.search_time_ms) + " ms/query");
 
-      r.recall_1 = computeRecall(labels, ground_truth, 1);
-      r.recall_5 = computeRecall(labels, ground_truth, 5);
-      r.recall_k = computeRecall(labels, ground_truth, k);
+      r.recall_1 = computeRecall1NN(labels, 1);
+      r.recall_5 = computeRecall1NN(labels, 5);
+      r.recall_k = computeRecall1NN(labels, k);
 
       r.mbs_on_disk = measureIndexSerializedSize(&index);
+      log_step(tag, std::string("serialized size=") +
+                        std::to_string(r.mbs_on_disk) + " MB");
       if (nb > 0) {
         double per_vec = (r.mbs_on_disk * 1024.0 * 1024.0) / nb;
         r.compression_ratio = ((double)dim * 4.0) / per_vec;
@@ -1079,7 +1203,8 @@ public:
           },
           mt_result);
       if (mt_ok) {
-        applyMultiThreadMetrics(r.method, r, labels, mt_result);
+        applyMultiThreadMetrics(r.method, r, &labels, mt_result,
+                                /*adopt_as_primary_if_no_baseline=*/false);
       }
     } catch (const std::exception &e) {
       std::cerr << "    错误: " << e.what() << std::endl;
@@ -1096,25 +1221,32 @@ public:
               << (centered ? ", centered" : "") << ")..." << std::endl;
     TestResult r{};
     r.method = "HNSW-RaBitQ";
+    std::string tag = r.method;
     r.hnsw_M = hnsw_m;
     r.efC = efC;
     r.efS = efS;
     r.rabitq_qb = qb;
     r.rabitq_centered = centered ? 1 : 0;
     try {
+      log_step(tag, "start");
       faiss::IndexHNSWRaBitQ index(dim, hnsw_m, faiss::METRIC_L2);
       index.hnsw.efConstruction = efC;
 
+      log_step(tag, std::string("train start nb=") + std::to_string(nb));
       auto t0 = std::chrono::high_resolution_clock::now();
       index.train(nb, database.data());
       auto t1 = std::chrono::high_resolution_clock::now();
       r.train_time = std::chrono::duration<double>(t1 - t0).count();
-
+      log_step(tag, std::string("train done, time=") +
+                        std::to_string(r.train_time) + " s");
+      log_step(tag, std::string("add start nb=") + std::to_string(nb));
       auto t2 = std::chrono::high_resolution_clock::now();
       index.add(nb, database.data());
       auto t3 = std::chrono::high_resolution_clock::now();
       r.add_time = std::chrono::duration<double>(t3 - t2).count();
       r.build_time = r.train_time + r.add_time;
+      log_step(tag, std::string("add done, time=") +
+                        std::to_string(r.add_time) + " s");
 
       index.set_query_quantization(qb, centered);
 
@@ -1123,19 +1255,28 @@ public:
       sp.qb = (uint8_t)qb;
       sp.centered = centered;
 
-      std::vector<float> distances(nq * k);
-      std::vector<faiss::idx_t> labels(nq * k);
+      std::vector<float> distances;
+      std::vector<faiss::idx_t> labels;
+      // Always run baseline
+      distances.resize((size_t)nq * k);
+      labels.resize((size_t)nq * k);
+      log_step(tag, std::string("search start nq=") + std::to_string(nq) +
+                        ", k=" + std::to_string(k));
       t0 = std::chrono::high_resolution_clock::now();
       index.search(nq, queries.data(), k, distances.data(), labels.data(), &sp);
       t1 = std::chrono::high_resolution_clock::now();
       r.search_time_ms =
           std::chrono::duration<double, std::milli>(t1 - t0).count() / nq;
+      log_step(tag, std::string("search done, time=") +
+                        std::to_string(r.search_time_ms) + " ms/query");
 
-      r.recall_1 = computeRecall(labels, ground_truth, 1);
-      r.recall_5 = computeRecall(labels, ground_truth, 5);
-      r.recall_k = computeRecall(labels, ground_truth, k);
+      r.recall_1 = computeRecall1NN(labels, 1);
+      r.recall_5 = computeRecall1NN(labels, 5);
+      r.recall_k = computeRecall1NN(labels, k);
 
       r.mbs_on_disk = measureIndexSerializedSize(&index);
+      log_step(tag, std::string("serialized size=") +
+                        std::to_string(r.mbs_on_disk) + " MB");
       if (nb > 0) {
         double per_vec = (r.mbs_on_disk * 1024.0 * 1024.0) / nb;
         r.compression_ratio = ((double)dim * 4.0) / per_vec;
@@ -1158,7 +1299,8 @@ public:
           },
           mt_result);
       if (mt_ok) {
-        applyMultiThreadMetrics(r.method, r, labels, mt_result);
+        applyMultiThreadMetrics(r.method, r, &labels, mt_result,
+                                /*adopt_as_primary_if_no_baseline=*/false);
       }
     } catch (const std::exception &e) {
       std::cerr << "    错误: " << e.what() << std::endl;
@@ -1173,40 +1315,57 @@ public:
               << ")..." << std::endl;
     TestResult r{};
     r.method = "IVF-Flat";
+    std::string tag = r.method;
     r.ivf_nlist = nlist;
     r.ivf_nprobe = nprobe;
     try {
+      log_step(tag, "start");
       faiss::IndexFlatL2 coarse(dim);
       faiss::IndexIVFFlat index(&coarse, dim, nlist, faiss::METRIC_L2);
       // need train
+      log_step(tag, std::string("train start nb=") + std::to_string(nb));
       auto t0 = std::chrono::high_resolution_clock::now();
       index.train(nb, database.data());
       auto t1 = std::chrono::high_resolution_clock::now();
       r.train_time = std::chrono::duration<double>(t1 - t0).count();
+      log_step(tag, std::string("train done, time=") +
+                        std::to_string(r.train_time) + " s");
+      log_step(tag, std::string("add start nb=") + std::to_string(nb));
       auto t2 = std::chrono::high_resolution_clock::now();
       index.add(nb, database.data());
       auto t3 = std::chrono::high_resolution_clock::now();
       r.add_time = std::chrono::duration<double>(t3 - t2).count();
       r.build_time = r.train_time + r.add_time;
+      log_step(tag, std::string("add done, time=") +
+                        std::to_string(r.add_time) + " s");
       std::cout << std::fixed << std::setprecision(3)
                 << "    训练(train)= " << r.train_time
                 << " s, 建索引(add)= " << r.add_time
                 << " s, 总构建= " << r.build_time << " s" << std::endl;
 
       index.nprobe = nprobe;
-      std::vector<float> distances(nq * k);
-      std::vector<faiss::idx_t> labels(nq * k);
+      std::vector<float> distances;
+      std::vector<faiss::idx_t> labels;
+      // Always run baseline
+      distances.resize((size_t)nq * k);
+      labels.resize((size_t)nq * k);
+      log_step(tag, std::string("search start nq=") + std::to_string(nq) +
+                        ", k=" + std::to_string(k));
       t0 = std::chrono::high_resolution_clock::now();
       index.search(nq, queries.data(), k, distances.data(), labels.data());
       t1 = std::chrono::high_resolution_clock::now();
       r.search_time_ms =
           std::chrono::duration<double, std::milli>(t1 - t0).count() / nq;
+      log_step(tag, std::string("search done, time=") +
+                        std::to_string(r.search_time_ms) + " ms/query");
 
-      r.recall_1 = computeRecall(labels, ground_truth, 1);
-      r.recall_5 = computeRecall(labels, ground_truth, 5);
-      r.recall_k = computeRecall(labels, ground_truth, k);
+      r.recall_1 = computeRecall1NN(labels, 1);
+      r.recall_5 = computeRecall1NN(labels, 5);
+      r.recall_k = computeRecall1NN(labels, k);
 
       r.mbs_on_disk = measureIndexSerializedSize(&index);
+      log_step(tag, std::string("serialized size=") +
+                        std::to_string(r.mbs_on_disk) + " MB");
       // For IVF-Flat, vectors stored in float -> no compression
       r.compression_ratio = 1.0; // mark as 1.0; will be printed as NA below
 
@@ -1221,7 +1380,8 @@ public:
           },
           mt_result);
       if (mt_ok) {
-        applyMultiThreadMetrics(r.method, r, labels, mt_result);
+        applyMultiThreadMetrics(r.method, r, &labels, mt_result,
+                                /*adopt_as_primary_if_no_baseline=*/false);
       }
     } catch (const std::exception &e) {
       std::cerr << "    错误: " << e.what() << std::endl;
@@ -1238,12 +1398,14 @@ public:
               << ", tr=" << train_ratio << ")..." << std::endl;
     TestResult r{};
     r.method = "IVF-PQ";
+    std::string tag = r.method;
     r.ivf_nlist = nlist;
     r.ivf_nprobe = nprobe;
     r.pq_m = m;
     r.pq_nbits = nbits;
     r.pq_train_ratio = train_ratio;
     try {
+      log_step(tag, "start");
       if (dim % m != 0) {
         std::cout << "    跳过：dim=" << dim << " 不能被 m=" << m << " 整除"
                   << std::endl;
@@ -1258,34 +1420,49 @@ public:
         train_n = 1;
       if (train_n > nb)
         train_n = nb;
+      log_step(tag, std::string("train start n=") + std::to_string(train_n));
       auto t0 = std::chrono::high_resolution_clock::now();
       index.train(train_n, database.data());
       auto t1 = std::chrono::high_resolution_clock::now();
       r.train_time = std::chrono::duration<double>(t1 - t0).count();
+      log_step(tag, std::string("train done, time=") +
+                        std::to_string(r.train_time) + " s");
+      log_step(tag, std::string("add start nb=") + std::to_string(nb));
       auto t2 = std::chrono::high_resolution_clock::now();
       index.add(nb, database.data());
       auto t3 = std::chrono::high_resolution_clock::now();
       r.add_time = std::chrono::duration<double>(t3 - t2).count();
       r.build_time = r.train_time + r.add_time;
+      log_step(tag, std::string("add done, time=") +
+                        std::to_string(r.add_time) + " s");
       std::cout << std::fixed << std::setprecision(3)
                 << "    训练(train)= " << r.train_time
                 << " s, 建索引(add)= " << r.add_time
                 << " s, 总构建= " << r.build_time << " s" << std::endl;
 
       index.nprobe = nprobe;
-      std::vector<float> distances(nq * k);
-      std::vector<faiss::idx_t> labels(nq * k);
+      std::vector<float> distances;
+      std::vector<faiss::idx_t> labels;
+      // Always run baseline
+      distances.resize((size_t)nq * k);
+      labels.resize((size_t)nq * k);
+      log_step(tag, std::string("search start nq=") + std::to_string(nq) +
+                        ", k=" + std::to_string(k));
       t0 = std::chrono::high_resolution_clock::now();
       index.search(nq, queries.data(), k, distances.data(), labels.data());
       t1 = std::chrono::high_resolution_clock::now();
       r.search_time_ms =
           std::chrono::duration<double, std::milli>(t1 - t0).count() / nq;
+      log_step(tag, std::string("search done, time=") +
+                        std::to_string(r.search_time_ms) + " ms/query");
 
-      r.recall_1 = computeRecall(labels, ground_truth, 1);
-      r.recall_5 = computeRecall(labels, ground_truth, 5);
-      r.recall_k = computeRecall(labels, ground_truth, k);
+      r.recall_1 = computeRecall1NN(labels, 1);
+      r.recall_5 = computeRecall1NN(labels, 5);
+      r.recall_k = computeRecall1NN(labels, k);
 
       r.mbs_on_disk = measureIndexSerializedSize(&index);
+      log_step(tag, std::string("serialized size=") +
+                        std::to_string(r.mbs_on_disk) + " MB");
       if (nb > 0) {
         double per_vec = (r.mbs_on_disk * 1024.0 * 1024.0) / nb;
         r.compression_ratio = ((double)dim * 4.0) / per_vec;
@@ -1304,7 +1481,8 @@ public:
           },
           mt_result);
       if (mt_ok) {
-        applyMultiThreadMetrics(r.method, r, labels, mt_result);
+        applyMultiThreadMetrics(r.method, r, &labels, mt_result,
+                                /*adopt_as_primary_if_no_baseline=*/false);
       }
     } catch (const std::exception &e) {
       std::cerr << "    错误: " << e.what() << std::endl;
@@ -1321,18 +1499,24 @@ public:
               << std::endl;
     TestResult r{};
     r.method = "IVF-SQ" + std::to_string(getQTypeBits(qtype));
+    std::string tag = r.method;
     r.ivf_nlist = nlist;
     r.ivf_nprobe = nprobe;
     r.qtype = qtype;
     try {
+      log_step(tag, "start");
       faiss::IndexFlatL2 coarse(dim);
       faiss::IndexIVFScalarQuantizer index(
           &coarse, dim, nlist, (faiss::ScalarQuantizer::QuantizerType)qtype,
           faiss::METRIC_L2);
+      log_step(tag, std::string("train start nb=") + std::to_string(nb));
       auto t0 = std::chrono::high_resolution_clock::now();
       index.train(nb, database.data());
       auto t1 = std::chrono::high_resolution_clock::now();
       r.train_time = std::chrono::duration<double>(t1 - t0).count();
+      log_step(tag, std::string("train done, time=") +
+                        std::to_string(r.train_time) + " s");
+      log_step(tag, std::string("add start nb=") + std::to_string(nb));
       auto t2 = std::chrono::high_resolution_clock::now();
       index.add(nb, database.data());
       auto t3 = std::chrono::high_resolution_clock::now();
@@ -1344,19 +1528,28 @@ public:
                 << " s, 总构建= " << r.build_time << " s" << std::endl;
 
       index.nprobe = nprobe;
-      std::vector<float> distances(nq * k);
-      std::vector<faiss::idx_t> labels(nq * k);
+      std::vector<float> distances;
+      std::vector<faiss::idx_t> labels;
+      // Always run baseline
+      distances.resize((size_t)nq * k);
+      labels.resize((size_t)nq * k);
+      log_step(tag, std::string("search start nq=") + std::to_string(nq) +
+                        ", k=" + std::to_string(k));
       t0 = std::chrono::high_resolution_clock::now();
       index.search(nq, queries.data(), k, distances.data(), labels.data());
       t1 = std::chrono::high_resolution_clock::now();
       r.search_time_ms =
           std::chrono::duration<double, std::milli>(t1 - t0).count() / nq;
+      log_step(tag, std::string("search done, time=") +
+                        std::to_string(r.search_time_ms) + " ms/query");
 
-      r.recall_1 = computeRecall(labels, ground_truth, 1);
-      r.recall_5 = computeRecall(labels, ground_truth, 5);
-      r.recall_k = computeRecall(labels, ground_truth, k);
+      r.recall_1 = computeRecall1NN(labels, 1);
+      r.recall_5 = computeRecall1NN(labels, 5);
+      r.recall_k = computeRecall1NN(labels, k);
 
       r.mbs_on_disk = measureIndexSerializedSize(&index);
+      log_step(tag, std::string("serialized size=") +
+                        std::to_string(r.mbs_on_disk) + " MB");
       if (nb > 0) {
         double per_vec = (r.mbs_on_disk * 1024.0 * 1024.0) / nb;
         r.compression_ratio = ((double)dim * 4.0) / per_vec;
@@ -1375,7 +1568,8 @@ public:
           },
           mt_result);
       if (mt_ok) {
-        applyMultiThreadMetrics(r.method, r, labels, mt_result);
+        applyMultiThreadMetrics(r.method, r, &labels, mt_result,
+                                /*adopt_as_primary_if_no_baseline=*/false);
       }
     } catch (const std::exception &e) {
       std::cerr << "    错误: " << e.what() << std::endl;
@@ -1392,11 +1586,13 @@ public:
               << std::endl;
     TestResult r{};
     r.method = "IVF-RaBitQ";
+    std::string tag = r.method;
     r.ivf_nlist = nlist;
     r.ivf_nprobe = nprobe;
     r.rabitq_qb = qb;
     r.rabitq_centered = centered ? 1 : 0;
     try {
+      log_step(tag, "start");
       std::unique_ptr<faiss::IndexFlat> coarse =
           std::make_unique<faiss::IndexFlat>(dim, faiss::METRIC_L2);
       std::unique_ptr<faiss::IndexIVFRaBitQ> index =
@@ -1413,46 +1609,67 @@ public:
                                                                index.release());
       idx_rr->own_fields = true;
 
+      log_step(tag, std::string("train start nb=") + std::to_string(nb));
       auto t0 = std::chrono::high_resolution_clock::now();
       // Use more training data if available for better quantization
       int train_size = std::min(nb, std::max(50000, nb / 2));
       idx_rr->train(train_size, database.data());
       auto t1 = std::chrono::high_resolution_clock::now();
       r.train_time = std::chrono::duration<double>(t1 - t0).count();
+      log_step(tag, std::string("train done, time=") +
+                        std::to_string(r.train_time) +
+                        " s (n=" + std::to_string(train_size) + ")");
+      log_step(tag, std::string("add start nb=") + std::to_string(nb));
       auto t2 = std::chrono::high_resolution_clock::now();
       idx_rr->add(nb, database.data());
       auto t3 = std::chrono::high_resolution_clock::now();
       r.add_time = std::chrono::duration<double>(t3 - t2).count();
       r.build_time = r.train_time + r.add_time;
+      log_step(tag, std::string("add done, time=") +
+                        std::to_string(r.add_time) + " s");
       std::cout << std::fixed << std::setprecision(3)
                 << "    训练(train)= " << r.train_time
                 << " s, 建索引(add)= " << r.add_time
                 << " s, 总构建= " << r.build_time
                 << " s, 训练样本=" << train_size << std::endl;
 
-      std::vector<float> distances(nq * k);
-      std::vector<faiss::idx_t> labels(nq * k);
-      faiss::IVFRaBitQSearchParameters sp;
+  std::vector<float> distances;
+  std::vector<faiss::idx_t> labels;
+  faiss::IVFRaBitQSearchParameters sp;
       sp.qb = (uint8_t)qb;
       sp.centered = centered;
       // Important: when passing SearchParameters, nprobe from params is used.
       // Default is 1, so make sure to pass the desired nprobe here.
       sp.nprobe = nprobe;
-      t0 = std::chrono::high_resolution_clock::now();
-      idx_rr->search(nq, queries.data(), k, distances.data(), labels.data(),
-                     &sp);
-      t1 = std::chrono::high_resolution_clock::now();
-      r.search_time_ms =
-          std::chrono::duration<double, std::milli>(t1 - t0).count() / nq;
+      bool skip_baseline = (mt_threads > 1);
+      if (!skip_baseline) {
+        distances.resize((size_t)nq * k);
+        labels.resize((size_t)nq * k);
+        log_step(tag, std::string("search start nq=") + std::to_string(nq) +
+                          ", k=" + std::to_string(k) +
+                          ", nprobe=" + std::to_string(sp.nprobe));
+        t0 = std::chrono::high_resolution_clock::now();
+        idx_rr->search(nq, queries.data(), k, distances.data(), labels.data(),
+                       &sp);
+        t1 = std::chrono::high_resolution_clock::now();
+        r.search_time_ms =
+            std::chrono::duration<double, std::milli>(t1 - t0).count() / nq;
+        log_step(tag, std::string("search done, time=") +
+                          std::to_string(r.search_time_ms) + " ms/query");
+      }
 
       std::cout << "    调试: nprobe=" << sp.nprobe << ", qb=" << (int)sp.qb
                 << ", centered=" << sp.centered << std::endl;
 
-      r.recall_1 = computeRecall(labels, ground_truth, 1);
-      r.recall_5 = computeRecall(labels, ground_truth, 5);
-      r.recall_k = computeRecall(labels, ground_truth, k);
+      if (!labels.empty()) {
+        r.recall_1 = computeRecall1NN(labels, 1);
+        r.recall_5 = computeRecall1NN(labels, 5);
+        r.recall_k = computeRecall1NN(labels, k);
+      }
 
       r.mbs_on_disk = measureIndexSerializedSize(idx_rr.get());
+      log_step(tag, std::string("serialized size=") +
+                        std::to_string(r.mbs_on_disk) + " MB");
       if (nb > 0) {
         double per_vec = (r.mbs_on_disk * 1024.0 * 1024.0) / nb;
         r.compression_ratio = ((double)dim * 4.0) / per_vec;
@@ -1475,7 +1692,8 @@ public:
           },
           mt_result);
       if (mt_ok) {
-        applyMultiThreadMetrics(r.method, r, labels, mt_result);
+        applyMultiThreadMetrics(r.method, r, &labels, mt_result,
+                                /*adopt_as_primary_if_no_baseline=*/false);
       }
     } catch (const std::exception &e) {
       std::cerr << "    错误: " << e.what() << std::endl;
@@ -1494,6 +1712,7 @@ public:
               << ")..." << std::endl;
     TestResult r{};
     r.method = "IVF-RaBitQ-Refine";
+    std::string tag = r.method;
     r.ivf_nlist = nlist;
     r.ivf_nprobe = nprobe;
     r.rabitq_qb = qb;
@@ -1501,6 +1720,7 @@ public:
     r.refine_type = refine_type;
     r.refine_k = refine_k;
     try {
+      log_step(tag, "start");
       // Base: RR -> IVFRaBitQ
       std::unique_ptr<faiss::IndexFlatL2> coarse =
           std::make_unique<faiss::IndexFlatL2>(dim);
@@ -1555,10 +1775,14 @@ public:
       wrapper->own_fields = true;
 
       // Train both indices as needed
+      log_step(tag, std::string("train+add start nb=") + std::to_string(nb));
       auto t0 = std::chrono::high_resolution_clock::now();
       wrapper->train(nb, database.data());
       auto t1 = std::chrono::high_resolution_clock::now();
       r.train_time = std::chrono::duration<double>(t1 - t0).count();
+      log_step(tag, std::string("train done, time=") +
+                        std::to_string(r.train_time) + " s");
+      log_step(tag, std::string("add start nb=") + std::to_string(nb));
       auto t2 = std::chrono::high_resolution_clock::now();
       wrapper->add(nb, database.data());
       auto t3 = std::chrono::high_resolution_clock::now();
@@ -1570,8 +1794,8 @@ public:
                 << " s, 总构建= " << r.build_time << " s" << std::endl;
 
       // Search with two-stage params
-      std::vector<float> distances(nq * k);
-      std::vector<faiss::idx_t> labels(nq * k);
+      std::vector<float> distances;
+      std::vector<faiss::idx_t> labels;
       faiss::IVFRaBitQSearchParameters ivf_sp;
       ivf_sp.qb = (uint8_t)qb;
       ivf_sp.centered = centered;
@@ -1580,18 +1804,28 @@ public:
       faiss::IndexRefineSearchParameters ref_sp;
       ref_sp.k_factor = refine_k;
       ref_sp.base_index_params = &ivf_sp;
+      // Always run baseline
+      distances.resize((size_t)nq * k);
+      labels.resize((size_t)nq * k);
+      log_step(tag, std::string("search start nq=") + std::to_string(nq) +
+                        ", k=" + std::to_string(k) +
+                        ", refine_k=" + std::to_string(refine_k));
       t0 = std::chrono::high_resolution_clock::now();
       wrapper->search(nq, queries.data(), k, distances.data(), labels.data(),
                       &ref_sp);
       t1 = std::chrono::high_resolution_clock::now();
       r.search_time_ms =
           std::chrono::duration<double, std::milli>(t1 - t0).count() / nq;
+      log_step(tag, std::string("search done, time=") +
+                        std::to_string(r.search_time_ms) + " ms/query");
 
       r.recall_1 = computeRecall(labels, ground_truth, 1);
       r.recall_5 = computeRecall(labels, ground_truth, 5);
       r.recall_k = computeRecall(labels, ground_truth, k);
 
       r.mbs_on_disk = measureIndexSerializedSize(wrapper.get());
+      log_step(tag, std::string("serialized size=") +
+                        std::to_string(r.mbs_on_disk) + " MB");
       if (nb > 0) {
         double per_vec = (r.mbs_on_disk * 1024.0 * 1024.0) / nb;
         r.compression_ratio = ((double)dim * 4.0) / per_vec;
@@ -1618,7 +1852,8 @@ public:
           },
           mt_result);
       if (mt_ok) {
-        applyMultiThreadMetrics(r.method, r, labels, mt_result);
+        applyMultiThreadMetrics(r.method, r, &labels, mt_result,
+                                /*adopt_as_primary_if_no_baseline=*/false);
       }
     } catch (const std::exception &e) {
       std::cerr << "    错误: " << e.what() << std::endl;
@@ -1634,38 +1869,55 @@ public:
               << std::endl;
     TestResult r{};
     r.method = "RaBitQ";
+    std::string tag = r.method;
     r.rabitq_qb = qb;
     r.rabitq_centered = centered ? 1 : 0;
     try {
+      log_step(tag, "start");
       faiss::IndexRaBitQ index(dim, faiss::METRIC_L2);
       // train
+      log_step(tag, std::string("train start nb=") + std::to_string(nb));
       auto t0 = std::chrono::high_resolution_clock::now();
       index.train(nb, database.data());
       auto t1 = std::chrono::high_resolution_clock::now();
       r.train_time = std::chrono::duration<double>(t1 - t0).count();
+      log_step(tag, std::string("train done, time=") +
+                        std::to_string(r.train_time) + " s");
       // add
+      log_step(tag, std::string("add start nb=") + std::to_string(nb));
       auto t2 = std::chrono::high_resolution_clock::now();
       index.add(nb, database.data());
       auto t3 = std::chrono::high_resolution_clock::now();
       r.add_time = std::chrono::duration<double>(t3 - t2).count();
       r.build_time = r.train_time + r.add_time;
+      log_step(tag, std::string("add done, time=") +
+                        std::to_string(r.add_time) + " s");
 
-      std::vector<float> distances(nq * k);
-      std::vector<faiss::idx_t> labels(nq * k);
+      std::vector<float> distances;
+      std::vector<faiss::idx_t> labels;
       faiss::RaBitQSearchParameters sp;
       sp.qb = (uint8_t)qb;
       sp.centered = centered;
+      // Always run baseline
+      distances.resize((size_t)nq * k);
+      labels.resize((size_t)nq * k);
+      log_step(tag, std::string("search start nq=") + std::to_string(nq) +
+                        ", k=" + std::to_string(k));
       t0 = std::chrono::high_resolution_clock::now();
       index.search(nq, queries.data(), k, distances.data(), labels.data(), &sp);
       t1 = std::chrono::high_resolution_clock::now();
       r.search_time_ms =
           std::chrono::duration<double, std::milli>(t1 - t0).count() / nq;
+      log_step(tag, std::string("search done, time=") +
+                        std::to_string(r.search_time_ms) + " ms/query");
 
       r.recall_1 = computeRecall(labels, ground_truth, 1);
       r.recall_5 = computeRecall(labels, ground_truth, 5);
       r.recall_k = computeRecall(labels, ground_truth, k);
 
       r.mbs_on_disk = measureIndexSerializedSize(&index);
+      log_step(tag, std::string("serialized size=") +
+                        std::to_string(r.mbs_on_disk) + " MB");
       if (nb > 0) {
         double per_vec = (r.mbs_on_disk * 1024.0 * 1024.0) / nb;
         r.compression_ratio = ((double)dim * 4.0) / per_vec;
@@ -1690,7 +1942,8 @@ public:
           },
           mt_result);
       if (mt_ok) {
-        applyMultiThreadMetrics(r.method, r, labels, mt_result);
+        applyMultiThreadMetrics(r.method, r, &labels, mt_result,
+                                /*adopt_as_primary_if_no_baseline=*/false);
       }
     } catch (const std::exception &e) {
       std::cerr << "    错误: " << e.what() << std::endl;
@@ -1702,7 +1955,8 @@ public:
 #ifdef HAVE_VECML
   // VecML test using the C shim (vecml_shim)
   TestResult testVecML(const std::string &base_path,
-                       const std::string &license_path, int mt_threads_option) {
+                       const std::string &license_path, int mt_threads_option,
+                       int vec_threads_option) {
     TestResult r{};
     r.method = "VecML";
     r.dim = dim;
@@ -1710,15 +1964,24 @@ public:
     r.nq = nq;
     r.k = k;
     // create ctx
-  vecml_ctx_t ctx = vecml_create(base_path.c_str(), license_path.c_str(), /*fast_index=*/false);
+    log_step("VecML", std::string("create context, base=") + base_path +
+                          ", license=" + license_path + ", fast_index=false");
+    vecml_ctx_t ctx = vecml_create(base_path.c_str(), license_path.c_str(),
+                                   /*fast_index=*/false);
     if (!ctx) {
       std::cerr << "VecML: failed to create context" << std::endl;
       r.build_time = -1;
       return r;
     }
+    // Configure threads for index attach and add operations
+    vecml_set_threads(ctx, vec_threads_option);
+    log_step("VecML",
+             std::string("set_threads=") + std::to_string(vec_threads_option));
     // VecML does not have a separate train phase. Measure add_time and set
     // build_time = add_time to reflect that "build" is just adding data.
     try {
+      log_step("VecML", std::string("add_data start nb=") + std::to_string(nb) +
+                            ", dim=" + std::to_string(dim));
       auto t_add0 = std::chrono::high_resolution_clock::now();
       int add_ret = vecml_add_data(ctx, database.data(), nb, dim, nullptr);
       auto t_add1 = std::chrono::high_resolution_clock::now();
@@ -1729,15 +1992,16 @@ public:
         return r;
       }
       r.add_time = std::chrono::duration<double>(t_add1 - t_add0).count();
+      log_step("VecML", std::string("add_data done, time=") +
+                            std::to_string(r.add_time) + " s");
       r.train_time = 0.0; // no train step in VecML
       r.build_time = r.add_time;
 
-      // Get file size after adding data
-      double disk_mb = vecml_get_disk_mb(ctx);
-      std::cerr << "vecml_add_data: total disk usage after add: " << disk_mb
-                << " MB\n";
-
-      // Search timing
+      int threads = mt_threads_option;
+      std::vector<faiss::idx_t> labels; // baseline labels
+      // Always run baseline single-thread search to populate serial metrics
+      log_step("VecML", std::string("search start nq=") + std::to_string(nq) +
+                            ", k=" + std::to_string(k));
       std::vector<long> out_ids((size_t)nq * k, -1);
       auto t_s0 = std::chrono::high_resolution_clock::now();
       int sret = vecml_search(ctx, queries.data(), nq, dim, k, out_ids.data());
@@ -1749,13 +2013,11 @@ public:
         return r;
       }
       double search_sec = std::chrono::duration<double>(t_s1 - t_s0).count();
-      if (nq > 0)
-        r.search_time_ms = (search_sec / (double)nq) * 1000.0;
-      else
-        r.search_time_ms = 0.0;
+      r.search_time_ms = nq > 0 ? (search_sec / (double)nq) * 1000.0 : 0.0;
+      log_step("VecML", std::string("search done, time=") +
+                            std::to_string(r.search_time_ms) + " ms/query");
 
-      // convert to faiss labels
-      std::vector<faiss::idx_t> labels((size_t)nq * k);
+      labels.assign((size_t)nq * k, -1);
       for (int i = 0; i < nq * k; ++i) {
         labels[i] =
             out_ids[i] >= 0 ? static_cast<faiss::idx_t>(out_ids[i]) : -1;
@@ -1766,7 +2028,6 @@ public:
 
       // Only run multi-thread smoke test if the user explicitly provided
       // --mt-threads (mt_threads_option > 0). Do not auto-detect.
-      int threads = mt_threads_option;
       if (threads <= 1) {
         std::cout << "\n[VecML-MT] Skip multi-thread test: --mt-threads not "
                      "provided or <=1"
@@ -1828,35 +2089,25 @@ public:
             mt_labels[i] =
                 mt_out[i] >= 0 ? static_cast<faiss::idx_t>(mt_out[i]) : -1;
           }
-          double mt_recall_1 = computeRecall(mt_labels, ground_truth, 1);
-          double mt_recall_5 =
-              computeRecall(mt_labels, ground_truth, std::min(5, k));
-          double mt_recall_k = computeRecall(mt_labels, ground_truth, k);
-          bool match = (mt_labels == labels);
+          double mt_recall_1 = computeRecall1NN(mt_labels, 1);
+          double mt_recall_5 = computeRecall1NN(mt_labels, std::min(5, k));
+          double mt_recall_k = computeRecall1NN(mt_labels, k);
 
-          std::cout << std::fixed << std::setprecision(3)
-                    << "Sequential : " << r.search_time_ms
-                    << " ms/query, recall@" << k << "=" << r.recall_k
-                    << std::endl;
-          std::cout << "Multi-thread: " << mt_ms_per_query
-                    << " ms/query, recall@" << k << "=" << mt_recall_k
-                    << std::endl;
           r.has_mt = true;
           r.mt_threads = threads;
           r.mt_search_time_ms = mt_ms_per_query;
           r.mt_recall_k = mt_recall_k;
           r.mt_recall_1 = mt_recall_1;
           r.mt_recall_5 = mt_recall_5;
-          std::cout << "Verification: " << (match ? "PASS" : "FAIL")
+          // Print MT summary line for reference (serial metrics remain in r.*)
+          std::cout << std::fixed << std::setprecision(3)
+                    << "Multi-thread: " << mt_ms_per_query
+                    << " ms/query, recall@" << k << "=" << mt_recall_k
                     << std::endl;
-          if (!match) {
-            std::cout << "[WARN] VecML multi-thread results differ from "
-                         "single-thread baseline"
-                      << std::endl;
-          }
         }
       }
 
+      log_step("VecML", "destroy context");
       vecml_destroy(ctx);
 
       double final_disk_mb = computeDirectorySizeMB(base_path);
@@ -1867,8 +2118,8 @@ public:
         if (final_disk_mb > 0.0) {
           r.compression_ratio = raw_mb / final_disk_mb;
         }
-        std::cerr << "vecml_destroy: persisted disk usage: " << final_disk_mb
-                  << " MB\n";
+        log_step("VecML", std::string("persisted disk usage=") +
+                              std::to_string(final_disk_mb) + " MB");
       }
 
       return r;
@@ -1886,31 +2137,46 @@ public:
   // VecML Fast Index test (attach_soil_index) using the C shim
   TestResult testVecMLFastIdx(const std::string &base_path,
                               const std::string &license_path,
-                              int mt_threads_option) {
+                              int mt_threads_option, int vec_threads_option) {
     TestResult r{};
     r.method = "VecML-Fast-Idx";
     r.dim = dim;
     r.nb = nb;
     r.nq = nq;
     r.k = k;
-  vecml_ctx_t ctx = vecml_create(base_path.c_str(), license_path.c_str(), /*fast_index=*/true);
+    log_step("VecML-Fast-Idx", std::string("create context, base=") +
+                                   base_path + ", license=" + license_path +
+                                   ", fast_index=true");
+    vecml_ctx_t ctx = vecml_create(base_path.c_str(), license_path.c_str(),
+                                   /*fast_index=*/true);
     if (!ctx) {
       std::cerr << "VecML-Fast-Idx: failed to create context" << std::endl;
       r.build_time = -1;
       return r;
     }
-    // Enable fast index before adding data. Use sensible defaults.
-    int index_threads = mt_threads_option > 0 ? mt_threads_option : 8;
-    if (vecml_enable_fast_index(ctx, /*shrink_rate=*/0.4f,
-                                /*max_num_samples=*/std::max(nb, 100000),
-                                index_threads) != 0) {
+    // Configure threads and enable fast index before adding data
+    vecml_set_threads(ctx, vec_threads_option);
+    log_step("VecML-Fast-Idx",
+             std::string("set_threads=") + std::to_string(vec_threads_option));
+    if (vecml_enable_fast_index(
+            ctx, /*shrink_rate=*/0.4f,
+            /*max_num_samples=*/std::max(nb, 100000),
+            (vec_threads_option > 0 ? vec_threads_option : 8)) != 0) {
       std::cerr << "VecML-Fast-Idx: enable_fast_index failed" << std::endl;
       vecml_destroy(ctx);
       r.build_time = -1;
       return r;
     }
+    log_step(
+        "VecML-Fast-Idx",
+        std::string("enable_fast_index shrink=0.4 max_samples=") +
+            std::to_string(std::max(nb, 100000)) + ", threads=" +
+            std::to_string(vec_threads_option > 0 ? vec_threads_option : 8));
 
     try {
+      log_step("VecML-Fast-Idx", std::string("add_data start nb=") +
+                                     std::to_string(nb) +
+                                     ", dim=" + std::to_string(dim));
       auto t_add0 = std::chrono::high_resolution_clock::now();
       int add_ret = vecml_add_data(ctx, database.data(), nb, dim, nullptr);
       auto t_add1 = std::chrono::high_resolution_clock::now();
@@ -1922,14 +2188,18 @@ public:
         return r;
       }
       r.add_time = std::chrono::duration<double>(t_add1 - t_add0).count();
+      log_step("VecML-Fast-Idx", std::string("add_data done, time=") +
+                                     std::to_string(r.add_time) + " s");
       r.train_time = 0.0;
       r.build_time = r.add_time;
 
-      double disk_mb = vecml_get_disk_mb(ctx);
-      std::cerr << "vecml_fast_add_data: total disk usage after add: "
-                << disk_mb << " MB\n";
-
+      // Always run single-thread baseline first
+      int threads = mt_threads_option;
+      std::vector<faiss::idx_t> labels; // baseline labels
       std::vector<long> out_ids((size_t)nq * k, -1);
+      log_step("VecML-Fast-Idx", std::string("search start nq=") +
+                                     std::to_string(nq) +
+                                     ", k=" + std::to_string(k));
       auto t_s0 = std::chrono::high_resolution_clock::now();
       int sret = vecml_search(ctx, queries.data(), nq, dim, k, out_ids.data());
       auto t_s1 = std::chrono::high_resolution_clock::now();
@@ -1941,17 +2211,19 @@ public:
       }
       double search_sec = std::chrono::duration<double>(t_s1 - t_s0).count();
       r.search_time_ms = nq > 0 ? (search_sec / (double)nq) * 1000.0 : 0.0;
+      log_step("VecML-Fast-Idx", std::string("search done, time=") +
+                                     std::to_string(r.search_time_ms) +
+                                     " ms/query");
 
-      std::vector<faiss::idx_t> labels((size_t)nq * k);
+      labels.assign((size_t)nq * k, -1);
       for (int i = 0; i < nq * k; ++i) {
         labels[i] = out_ids[i] >= 0 ? static_cast<faiss::idx_t>(out_ids[i]) : -1;
       }
-      r.recall_1 = computeRecall(labels, ground_truth, 1);
-      r.recall_5 = computeRecall(labels, ground_truth, 5);
-      r.recall_k = computeRecall(labels, ground_truth, k);
+      r.recall_1 = computeRecall1NN(labels, 1);
+      r.recall_5 = computeRecall1NN(labels, 5);
+      r.recall_k = computeRecall1NN(labels, k);
 
       // Optional: MT smoke test mirrors testVecML
-      int threads = mt_threads_option;
       if (threads > 1 && nq > 0 && k > 0) {
         std::cout << "\n=== VecML Fast-Idx Multi-thread Smoke Test (threads="
                   << threads << ") ===" << std::endl;
@@ -1998,11 +2270,17 @@ public:
           r.mt_threads = threads;
           r.mt_search_time_ms = mt_ms_per_query;
           r.mt_recall_1 = computeRecall(mt_labels, ground_truth, 1);
-          r.mt_recall_5 = computeRecall(mt_labels, ground_truth, std::min(5, k));
+          r.mt_recall_5 =
+              computeRecall(mt_labels, ground_truth, std::min(5, k));
           r.mt_recall_k = computeRecall(mt_labels, ground_truth, k);
         }
+      } else if (threads <= 1) {
+        std::cout << "\n[VecML-Fast-Idx-MT] Skip multi-thread test: "
+                     "--mt-threads not provided or <=1"
+                  << std::endl;
       }
 
+      log_step("VecML-Fast-Idx", "destroy context");
       vecml_destroy(ctx);
       double final_disk_mb = computeDirectorySizeMB(base_path);
       if (final_disk_mb >= 0.0) {
@@ -2012,6 +2290,8 @@ public:
         if (final_disk_mb > 0.0) {
           r.compression_ratio = raw_mb / final_disk_mb;
         }
+        log_step("VecML-Fast-Idx", std::string("persisted disk usage=") +
+                                       std::to_string(final_disk_mb) + " MB");
       }
       return r;
     } catch (const std::exception &e) {
@@ -2059,7 +2339,7 @@ public:
       return lst.empty() ? std::vector<double>{single} : lst;
     };
 
-  auto dim_list = prepareIntList(opt.dim_list, opt.dim);
+    auto dim_list = prepareIntList(opt.dim_list, opt.dim);
     auto nb_list = prepareIntList(opt.nb_list, opt.nb);
     auto nq_list = prepareIntList(opt.nq_list, opt.nq);
     auto k_list = prepareIntList(opt.k_list, opt.k);
@@ -2088,6 +2368,10 @@ public:
     if (use_sift1m) {
       // dim is determined by dataset; avoid redundant dim sweeps
       dim_list = {opt.dim};
+      // Ignore nb/nq/k CLI under SIFT1M; dataset decides sizes.
+      nb_list = {opt.nb};
+      nq_list = {opt.nq};
+      k_list = {opt.k};
     }
 
     // Iterate over dataset-level combinations first: dim, nb, nq, k
@@ -2098,9 +2382,13 @@ public:
             // Rebuild benchmark data for each dataset combo
             PQBenchmark bench_local(dim_v, nb_v, nq_v, k_v,
                                     opt.transpose_centroid, opt.save_data_dir,
-                                    opt.load_data_dir, opt.mt_threads);
+                                    opt.load_data_dir, opt.mt_threads,
+                                    /*skip_init=*/use_sift1m);
             if (use_sift1m) {
-              if (!bench_local.loadSift1M(opt.sift1m_dir, nb_v, nq_v, k_v)) {
+              // Load dataset, optionally applying user-provided limits.
+              if (!bench_local.loadSift1M(opt.sift1m_dir, opt.sift_nb_limit,
+                                          opt.sift_nq_limit,
+                                          opt.sift_k_override)) {
                 std::cerr << "SIFT1M 加载失败，跳过该组合" << std::endl;
                 continue;
               }
@@ -2284,12 +2572,14 @@ public:
             if (contains("vecml")) {
 #ifdef HAVE_VECML
               auto vr = bench_local.testVecML(
-                  opt.vecml_base_path, opt.vecml_license_path, opt.mt_threads);
+                  opt.vecml_base_path, opt.vecml_license_path, opt.mt_threads,
+                  opt.vecml_threads);
               if (vr.build_time >= 0) {
-                vr.dim = dim_v;
-                vr.nb = nb_v;
-                vr.nq = nq_v;
-                vr.k = k_v;
+                vr.dim = bench_local.getDim();
+                vr.nb = bench_local.getNb();
+                vr.nq = bench_local.getNq();
+                vr.k = bench_local.getK();
+                vr.dataset = bench_local.getDatasetName();
                 results.push_back(vr);
               }
 #else
@@ -2306,20 +2596,26 @@ public:
             // VecML Fast Index test
             if (contains("vecml-fast-idx")) {
 #ifdef HAVE_VECML
+              // Use a separate subdirectory for fast-idx to avoid reusing
+              // files from the standard VecML run when both are requested.
               auto fr = bench_local.testVecMLFastIdx(
-                  opt.vecml_base_path, opt.vecml_license_path,
-                  opt.mt_threads);
+                  opt.vecml_base_path.empty()
+                      ? std::string("")
+                      : (opt.vecml_base_path + "/fast_idx"),
+                  opt.vecml_license_path, opt.mt_threads, opt.vecml_threads);
               if (fr.build_time >= 0) {
-                fr.dim = dim_v;
-                fr.nb = nb_v;
-                fr.nq = nq_v;
-                fr.k = k_v;
+                fr.dim = bench_local.getDim();
+                fr.nb = bench_local.getNb();
+                fr.nq = bench_local.getNq();
+                fr.k = bench_local.getK();
+                fr.dataset = bench_local.getDatasetName();
                 results.push_back(fr);
               }
 #else
               static bool warned_vecml_fast = false;
               if (!warned_vecml_fast) {
-                std::cerr << "VecML fast index requested but not available in this build (HAVE_VECML not defined)."
+                std::cerr << "VecML fast index requested but not available in "
+                             "this build (HAVE_VECML not defined)."
                           << std::endl;
                 warned_vecml_fast = true;
               }
@@ -2388,20 +2684,20 @@ public:
 
     std::ostringstream header;
     header << std::left << std::setw(18) << "method" << ' ' << std::setw(10)
-      << "dataset" << ' ' << std::setw(6) << "dim" << ' ' << std::setw(8)
-      << "nb" << ' ' << std::setw(6) << "nq" << ' ' << std::setw(4) << "k" << ' ' << std::setw(8)
-           << "hnsw_M" << ' ' << std::setw(6) << "efC" << ' ' << std::setw(6)
-           << "efS" << ' ' << std::setw(10) << "ivf_nlist" << ' '
-           << std::setw(10) << "ivf_nprobe" << ' ' << std::setw(6) << "pq_m"
-           << ' ' << std::setw(10) << "pq_nbits" << ' ' << std::setw(10)
-           << "rbq_qb" << ' ' << std::setw(12) << "rbq_centered" << ' '
-           << std::setw(10) << "refine_k" << ' ' << std::setw(12)
-           << "refine_type" << ' ' << std::setw(10) << "qtype" << ' '
-           << std::setw(12) << "train_tm" << ' ' << std::setw(10) << "add_tm"
-           << ' ' << std::setw(12) << "build_tm" << ' ' << std::setw(14)
-           << "search_tm_ms" << ' ' << std::setw(10) << "r@1" << ' '
-           << std::setw(10) << "r@5" << ' ' << std::setw(10) << "r@k" << ' '
-           << std::setw(14) << "mbs_on_disk" << ' ' << std::setw(13)
+           << "dataset" << ' ' << std::setw(6) << "dim" << ' ' << std::setw(8)
+           << "nb" << ' ' << std::setw(6) << "nq" << ' ' << std::setw(4) << "k"
+           << ' ' << std::setw(8) << "hnsw_M" << ' ' << std::setw(6) << "efC"
+           << ' ' << std::setw(6) << "efS" << ' ' << std::setw(10)
+           << "ivf_nlist" << ' ' << std::setw(10) << "ivf_nprobe" << ' '
+           << std::setw(6) << "pq_m" << ' ' << std::setw(10) << "pq_nbits"
+           << ' ' << std::setw(10) << "rbq_qb" << ' ' << std::setw(12)
+           << "rbq_centered" << ' ' << std::setw(10) << "refine_k" << ' '
+           << std::setw(12) << "refine_type" << ' ' << std::setw(10) << "qtype"
+           << ' ' << std::setw(12) << "train_tm" << ' ' << std::setw(10)
+           << "add_tm" << ' ' << std::setw(12) << "build_tm" << ' '
+           << std::setw(14) << "search_tm_ms" << ' ' << std::setw(10) << "r@1"
+           << ' ' << std::setw(10) << "r@5" << ' ' << std::setw(10) << "r@k"
+           << ' ' << std::setw(14) << "mbs_on_disk" << ' ' << std::setw(13)
            << "compression";
     if (show_mt_columns) {
       header << ' ' << std::setw(11) << "mt_threads" << ' ' << std::setw(12)
@@ -2412,17 +2708,17 @@ public:
     std::cout << std::string(header_line.size(), '-') << std::endl;
 
     for (const auto &r : results) {
-    std::ostringstream row;
-    row << std::left << std::setw(18) << r.method << ' ' << std::setw(10)
-      << (r.dataset.empty() ? std::string("std-normal") : r.dataset) << ' '
-      << std::setw(6) << r.dim << ' ' << std::setw(8) << r.nb << ' ' << std::setw(6) << r.nq
-      << ' ' << std::setw(4) << r.k << ' ' << std::setw(8) << r.hnsw_M
-          << ' ' << std::setw(6) << r.efC << ' ' << std::setw(6) << r.efS << ' '
-          << std::setw(10) << r.ivf_nlist << ' ' << std::setw(10)
-          << r.ivf_nprobe << ' ' << std::setw(6) << r.pq_m << ' '
-          << std::setw(10) << r.pq_nbits << ' ' << std::setw(10) << r.rabitq_qb
-          << ' ' << std::setw(12) << r.rabitq_centered << ' ' << std::setw(10)
-          << r.refine_k << ' ' << std::setw(12)
+      std::ostringstream row;
+      row << std::left << std::setw(18) << r.method << ' ' << std::setw(10)
+          << (r.dataset.empty() ? std::string("std-normal") : r.dataset) << ' '
+          << std::setw(6) << r.dim << ' ' << std::setw(8) << r.nb << ' '
+          << std::setw(6) << r.nq << ' ' << std::setw(4) << r.k << ' '
+          << std::setw(8) << r.hnsw_M << ' ' << std::setw(6) << r.efC << ' '
+          << std::setw(6) << r.efS << ' ' << std::setw(10) << r.ivf_nlist << ' '
+          << std::setw(10) << r.ivf_nprobe << ' ' << std::setw(6) << r.pq_m
+          << ' ' << std::setw(10) << r.pq_nbits << ' ' << std::setw(10)
+          << r.rabitq_qb << ' ' << std::setw(12) << r.rabitq_centered << ' '
+          << std::setw(10) << r.refine_k << ' ' << std::setw(12)
           << (r.refine_type.empty() ? "NA" : r.refine_type) << ' '
           << std::setw(10)
           << ((r.method == std::string("HNSW-SQ") ||
@@ -2508,8 +2804,9 @@ public:
     auto csv_file = results_utils::openCsvAppend(path, existed);
     if (csv_file.is_open()) {
       if (!existed) {
-    csv_file
-      << "method,dataset,dim,nb,nq,k,hnsw_M,efC,efS,ivf_nlist,ivf_nprobe,pq_m,"
+        csv_file
+            << "method,dataset,dim,nb,nq,k,hnsw_M,efC,efS,ivf_nlist,ivf_nprobe,"
+               "pq_m,"
                "pq_nbits,rabitq_qb,rabitq_centered,refine_k,refine_type,"
                "qtype,train_time,add_time,build_time,search_time_ms,recall_at_"
                "1,"
@@ -2520,12 +2817,13 @@ public:
       std::string run_time = results_utils::currentRunTimeString();
 
       for (const auto &r : results) {
-  csv_file << r.method << "," << (r.dataset.empty() ? std::string("std-normal") : r.dataset) << ","
-     << r.dim << "," << r.nb << "," << r.nq
-     << "," << r.k << "," << r.hnsw_M << "," << r.efC << ","
-                 << r.efS << "," << r.ivf_nlist << "," << r.ivf_nprobe << ","
-                 << r.pq_m << "," << r.pq_nbits << "," << r.rabitq_qb << ","
-                 << r.rabitq_centered << "," << r.refine_k << ","
+        csv_file << r.method << ","
+                 << (r.dataset.empty() ? std::string("std-normal") : r.dataset)
+                 << "," << r.dim << "," << r.nb << "," << r.nq << "," << r.k
+                 << "," << r.hnsw_M << "," << r.efC << "," << r.efS << ","
+                 << r.ivf_nlist << "," << r.ivf_nprobe << "," << r.pq_m << ","
+                 << r.pq_nbits << "," << r.rabitq_qb << "," << r.rabitq_centered
+                 << "," << r.refine_k << ","
                  << (r.refine_type.empty() ? std::string("NA") : r.refine_type)
                  << ","
                  << ((r.method == std::string("HNSW-SQ") ||
@@ -2676,10 +2974,11 @@ struct IVFRaBitQRefineTest : public IndexTest {
 struct VecMLTestWrap : public IndexTest {
   std::string base_path, license_path;
   int mt_threads;
-  VecMLTestWrap(const std::string &b, const std::string &l, int mt)
-      : base_path(b), license_path(l), mt_threads(mt) {}
+  int vec_threads;
+  VecMLTestWrap(const std::string &b, const std::string &l, int mt, int vt)
+      : base_path(b), license_path(l), mt_threads(mt), vec_threads(vt) {}
   PQBenchmark::TestResult execute(PQBenchmark &bench) override {
-    return bench.testVecML(base_path, license_path, mt_threads);
+    return bench.testVecML(base_path, license_path, mt_threads, vec_threads);
   }
 };
 #endif
@@ -2851,9 +3150,32 @@ int main(int argc, char **argv) {
       nexts(opt.vecml_base_path);
     } else if (a == "--vecml-license") {
       nexts(opt.vecml_license_path);
+    } else if (a == "--vecml-threads") {
+      int v = 16;
+      auto next_int = [&](int &dst) {
+        if (i + 1 < argc)
+          dst = std::stoi(argv[++i]);
+      };
+      next_int(v);
+      if (v <= 0)
+        v = 16;
+      opt.vecml_threads = v;
     } else if (a == "--sift1m-dir") {
       nexts(opt.sift1m_dir);
-      if (!opt.sift1m_dir.empty()) opt.use_sift1m = true;
+      if (!opt.sift1m_dir.empty())
+        opt.use_sift1m = true;
+    } else if (a == "--sift1m-nb-limit") {
+      next(opt.sift_nb_limit);
+      if (opt.sift_nb_limit < 0)
+        opt.sift_nb_limit = -1;
+    } else if (a == "--sift1m-nq-limit") {
+      next(opt.sift_nq_limit);
+      if (opt.sift_nq_limit < 0)
+        opt.sift_nq_limit = -1;
+    } else if (a == "--sift1m-k-override") {
+      next(opt.sift_k_override);
+      if (opt.sift_k_override < 0)
+        opt.sift_k_override = -1;
     } else if (a == "--mt-threads") {
       std::string s;
       nexts(s);
@@ -2913,7 +3235,17 @@ int main(int argc, char **argv) {
              "(contains lib and headers)\n"
              "  --vecml-license PATH           path to VecML license file "
              "(optional, default: license.txt)\n";
-      std::cout << "  --sift1m-dir PATH           load SIFT1M dataset from PATH (expects sift_base.fvecs, sift_query.fvecs, sift_groundtruth.ivecs)\n";
+      std::cout << "  --vecml-threads INT         threads used by VecML for "
+                   "index attach/add (default 16)\n";
+      std::cout << "  --sift1m-dir PATH           load SIFT1M dataset from "
+                   "PATH (expects sift_base.fvecs, sift_query.fvecs, "
+                   "sift_groundtruth.ivecs)\n";
+      std::cout << "  --sift1m-nb-limit INT       optional: limit number of "
+                   "base vectors to first INT (default off)\n";
+      std::cout << "  --sift1m-nq-limit INT       optional: limit number of "
+                   "queries to first INT (default off)\n";
+      std::cout << "  --sift1m-k-override INT     optional: override top-K per "
+                   "query (capped by ground truth K)\n";
       std::cout << "  --mt-threads INT             threads for multi-thread "
                    "search across "
                    "all selected methods (default: hardware threads)\n";
@@ -2922,8 +3254,11 @@ int main(int argc, char **argv) {
   }
 
   try {
+    // Avoid generating synthetic data at top-level; per-combination
+    // instances will handle data init (and SIFT1M load if requested).
     PQBenchmark bench(opt.dim, opt.nb, opt.nq, opt.k, opt.transpose_centroid,
-                      opt.save_data_dir, opt.load_data_dir, opt.mt_threads);
+                      opt.save_data_dir, opt.load_data_dir, opt.mt_threads,
+                      /*skip_init=*/true);
     auto results = bench.runIndexTypeBenchmarks(opt);
 
     // Note: VecML tests are now executed per-dataset inside

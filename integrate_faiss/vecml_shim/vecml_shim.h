@@ -31,7 +31,11 @@ double vecml_get_disk_mb(vecml_ctx_t ctx);
 // Parameters:
 // - shrink_rate: in (0,1], larger for slightly higher recall but slower indexing. Default 0.4 is recommended.
 // - max_num_samples: approximate number of total vectors; affects internal tuning. E.g., set to nb if known.
-// - num_threads: threads for parallel indexing.
 int vecml_enable_fast_index(vecml_ctx_t ctx, float shrink_rate, int max_num_samples, int num_threads);
+
+// Set number of threads used by VecML operations in this context (index build,
+// add_data, and fast-index attach). If threads <= 0, implementation will clamp
+// to 1. Default is 16.
+void vecml_set_threads(vecml_ctx_t ctx, int threads);
 
 } // extern C
