@@ -103,7 +103,7 @@ int vecml_add_data(vecml_ctx_t ctx, const float *data, int n, int dim,
       } else {
         attach_ec = h->api->attach_index(
             (int)dim, "dense", fluffy::DistanceFunctionType::Euclidean,
-            h->index_name, 1);
+            h->index_name, 16);
       }
       if (attach_ec != fluffy::ErrorCode::Success) {
         std::cerr << "vecml_add_data warning: attach_index returned "
