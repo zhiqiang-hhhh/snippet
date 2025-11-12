@@ -8,6 +8,8 @@
 #include <cmath>
 #include <cstdlib>
 #include <ctime>
+#include <cstdio>
+#include <cstring>
 #include <faiss/IndexFlat.h>
 #include <faiss/IndexHNSW.h>
 #include <faiss/IndexIVF.h>
@@ -99,6 +101,56 @@ static double computeDirectorySizeMB(const std::string &path) {
   return bytes / (1024.0 * 1024.0);
 }
 
+// ---- SIFT1M helpers (fvecs/ivecs readers) ----
+static float *fvecs_read_all(const char *fname, size_t *d_out,
+                             size_t *n_out) {
+  FILE *f = fopen(fname, "rb");
+  if (!f) {
+    std::perror("fopen");
+    std::cerr << "could not open " << fname << std::endl;
+    return nullptr;
+  }
+  int d = 0;
+  size_t nr = fread(&d, 1, sizeof(int), f);
+  if (nr != sizeof(int)) {
+    fclose(f);
+    return nullptr;
+  }
+  if (!(d > 0 && d < 1000000)) {
+    fclose(f);
+    return nullptr;
+  }
+  fseek(f, 0, SEEK_SET);
+  struct stat st;
+  fstat(fileno(f), &st);
+  size_t sz = (size_t)st.st_size;
+  if (sz % ((size_t)(d + 1) * 4) != 0) {
+    fclose(f);
+    return nullptr;
+  }
+  size_t n = sz / ((size_t)(d + 1) * 4);
+  *d_out = (size_t)d;
+  *n_out = n;
+  float *x = new float[n * (size_t)(d + 1)];
+  size_t want = n * (size_t)(d + 1);
+  size_t nrf = fread(x, sizeof(float), want, f);
+  fclose(f);
+  if (nrf != want) {
+    delete[] x;
+    return nullptr;
+  }
+  // shift rows to remove header
+  for (size_t i = 0; i < n; i++) {
+    memmove(x + i * (size_t)d, x + 1 + i * (size_t)(d + 1),
+            (size_t)d * sizeof(*x));
+  }
+  return x;
+}
+
+static int *ivecs_read_all(const char *fname, size_t *d_out, size_t *n_out) {
+  return reinterpret_cast<int *>(fvecs_read_all(fname, d_out, n_out));
+}
+
 struct Options {
   int dim = 128;
   int nb = 20000;
@@ -134,6 +186,14 @@ struct Options {
   // Which tests to run: all, hnsw_flat, hnsw_sq4, hnsw_sq8, hnsw_pq,
   // hnsw_rabitq, ivf_flat, ivf_sq4, ivf_sq8, ivf_pq, ivf_rbq, rabitq
   std::vector<std::string> which = {"all"};
+
+  // SIFT1M dataset support
+  // If sift1m_dir is non-empty, load SIFT1M from this directory
+  // (expects sift_base.fvecs, sift_query.fvecs, sift_groundtruth.ivecs)
+  // and override dim/nb/nq/k based on file contents and limits provided
+  // by dim, nb, nq, k options (nb/nq/k act as upper bounds if set).
+  bool use_sift1m = false;
+  std::string sift1m_dir; // e.g., "sift1M"
 
   // IVF parameters (for IVF-Flat / IVF-PQ / IVF-SQ)
   int ivf_nlist = 256;
@@ -216,6 +276,12 @@ public:
       saveTestData();
     }
   }
+
+  // Accessors for current dataset config
+  int getDim() const { return dim; }
+  int getNb() const { return nb; }
+  int getNq() const { return nq; }
+  int getK() const { return k; }
 
   void generateData() {
     std::cout << "生成测试数据..." << std::endl;
@@ -446,6 +512,95 @@ public:
 
     file.close();
     return true;
+  }
+
+  // Load SIFT1M dataset from directory
+  bool loadSift1M(const std::string &dir, int nb_limit = -1, int nq_limit = -1,
+                  int k_override = -1) {
+    try {
+      std::string base_file = dir + "/sift_base.fvecs";
+      std::string query_file = dir + "/sift_query.fvecs";
+      std::string gt_file = dir + "/sift_groundtruth.ivecs";
+
+      size_t d_b = 0, n_b = 0;
+      float *xb = fvecs_read_all(base_file.c_str(), &d_b, &n_b);
+      if (!xb) {
+        std::cerr << "SIFT1M: failed to read " << base_file << std::endl;
+        return false;
+      }
+      size_t d_q = 0, n_q = 0;
+      float *xq = fvecs_read_all(query_file.c_str(), &d_q, &n_q);
+      if (!xq) {
+        delete[] xb;
+        std::cerr << "SIFT1M: failed to read " << query_file << std::endl;
+        return false;
+      }
+      if (d_b == 0 || d_b != d_q) {
+        delete[] xb;
+        delete[] xq;
+        std::cerr << "SIFT1M: dim mismatch or zero" << std::endl;
+        return false;
+      }
+      size_t k_gt = 0, n_gt = 0;
+      int *gt = ivecs_read_all(gt_file.c_str(), &k_gt, &n_gt);
+      if (!gt) {
+        delete[] xb;
+        delete[] xq;
+        std::cerr << "SIFT1M: failed to read " << gt_file << std::endl;
+        return false;
+      }
+      if (n_gt != n_q) {
+        delete[] xb;
+        delete[] xq;
+        delete[] gt;
+        std::cerr << "SIFT1M: ground truth nq mismatch" << std::endl;
+        return false;
+      }
+
+      size_t use_nb = (nb_limit > 0) ? std::min((size_t)nb_limit, n_b) : n_b;
+      size_t use_nq = (nq_limit > 0) ? std::min((size_t)nq_limit, n_q) : n_q;
+      size_t use_k = (k_override > 0) ? std::min((size_t)k_override, k_gt)
+                                      : std::min((size_t)k, k_gt);
+      if (use_nq == 0 || use_nb == 0 || use_k == 0) {
+        delete[] xb;
+        delete[] xq;
+        delete[] gt;
+        std::cerr << "SIFT1M: invalid limits after applying nb/nq/k" << std::endl;
+        return false;
+      }
+
+      dim = (int)d_b;
+      nb = (int)use_nb;
+      nq = (int)use_nq;
+      k = (int)use_k;
+      database.assign(nb * dim, 0.0f);
+      queries.assign(nq * dim, 0.0f);
+      for (size_t i = 0; i < use_nb; ++i) {
+        std::memcpy(database.data() + i * (size_t)dim,
+                    xb + i * (size_t)dim, (size_t)dim * sizeof(float));
+      }
+      for (size_t i = 0; i < use_nq; ++i) {
+        std::memcpy(queries.data() + i * (size_t)dim,
+                    xq + i * (size_t)dim, (size_t)dim * sizeof(float));
+      }
+      ground_truth.assign(nq * k, -1);
+      for (size_t qi = 0; qi < use_nq; ++qi) {
+        for (size_t j = 0; j < use_k; ++j) {
+          ground_truth[qi * (size_t)k + j] =
+              (faiss::idx_t)gt[qi * (size_t)k_gt + j];
+        }
+      }
+
+      delete[] xb;
+      delete[] xq;
+      delete[] gt;
+      std::cout << "加载 SIFT1M 成功: dim=" << dim << ", nb=" << nb
+                << ", nq=" << nq << ", k=" << k << std::endl;
+      return true;
+    } catch (const std::exception &e) {
+      std::cerr << "SIFT1M: exception: " << e.what() << std::endl;
+      return false;
+    }
   }
 
   struct TestResult {
@@ -1540,7 +1695,7 @@ public:
     r.nq = nq;
     r.k = k;
     // create ctx
-    vecml_ctx_t ctx = vecml_create(base_path.c_str(), license_path.c_str());
+  vecml_ctx_t ctx = vecml_create(base_path.c_str(), license_path.c_str(), /*fast_index=*/false);
     if (!ctx) {
       std::cerr << "VecML: failed to create context" << std::endl;
       r.build_time = -1;
@@ -1723,7 +1878,7 @@ public:
     r.nb = nb;
     r.nq = nq;
     r.k = k;
-    vecml_ctx_t ctx = vecml_create(base_path.c_str(), license_path.c_str());
+  vecml_ctx_t ctx = vecml_create(base_path.c_str(), license_path.c_str(), /*fast_index=*/true);
     if (!ctx) {
       std::cerr << "VecML-Fast-Idx: failed to create context" << std::endl;
       r.build_time = -1;
@@ -1889,7 +2044,7 @@ public:
       return lst.empty() ? std::vector<double>{single} : lst;
     };
 
-    auto dim_list = prepareIntList(opt.dim_list, opt.dim);
+  auto dim_list = prepareIntList(opt.dim_list, opt.dim);
     auto nb_list = prepareIntList(opt.nb_list, opt.nb);
     auto nq_list = prepareIntList(opt.nq_list, opt.nq);
     auto k_list = prepareIntList(opt.k_list, opt.k);
@@ -1914,6 +2069,12 @@ public:
     auto rbq_refine_k_list =
         prepareIntList(opt.rbq_refine_k_list, opt.rbq_refine_k);
 
+    bool use_sift1m = opt.use_sift1m && !opt.sift1m_dir.empty();
+    if (use_sift1m) {
+      // dim is determined by dataset; avoid redundant dim sweeps
+      dim_list = {opt.dim};
+    }
+
     // Iterate over dataset-level combinations first: dim, nb, nq, k
     for (int dim_v : dim_list) {
       for (int nb_v : nb_list) {
@@ -1923,6 +2084,12 @@ public:
             PQBenchmark bench_local(dim_v, nb_v, nq_v, k_v,
                                     opt.transpose_centroid, opt.save_data_dir,
                                     opt.load_data_dir, opt.mt_threads);
+            if (use_sift1m) {
+              if (!bench_local.loadSift1M(opt.sift1m_dir, nb_v, nq_v, k_v)) {
+                std::cerr << "SIFT1M 加载失败，跳过该组合" << std::endl;
+                continue;
+              }
+            }
             // HNSW param combos
             for (int hM : hnsw_M_list) {
               for (int efC_v : efC_list) {
@@ -1930,10 +2097,10 @@ public:
                   if (contains("hnsw_flat")) {
                     auto r = bench_local.testHNSWFlat(hM, efC_v, efS_v);
                     if (r.build_time >= 0) {
-                      r.dim = dim_v;
-                      r.nb = nb_v;
-                      r.nq = nq_v;
-                      r.k = k_v;
+                      r.dim = bench_local.getDim();
+                      r.nb = bench_local.getNb();
+                      r.nq = bench_local.getNq();
+                      r.k = bench_local.getK();
                       results.push_back(r);
                     }
                   }
@@ -1942,10 +2109,10 @@ public:
                   for (int qtype_v : hnsw_sq_types) {
                     auto r = bench_local.testHNSWSQ(qtype_v, hM, efC_v, efS_v);
                     if (r.build_time >= 0) {
-                      r.dim = dim_v;
-                      r.nb = nb_v;
-                      r.nq = nq_v;
-                      r.k = k_v;
+                      r.dim = bench_local.getDim();
+                      r.nb = bench_local.getNb();
+                      r.nq = bench_local.getNq();
+                      r.k = bench_local.getK();
                       results.push_back(r);
                     }
                   }
@@ -1956,10 +2123,10 @@ public:
                           auto r = bench_local.testHNSWPQ(m_v, nbits_v, hM,
                                                           efC_v, efS_v, tr_v);
                           if (r.build_time >= 0) {
-                            r.dim = dim_v;
-                            r.nb = nb_v;
-                            r.nq = nq_v;
-                            r.k = k_v;
+                            r.dim = bench_local.getDim();
+                            r.nb = bench_local.getNb();
+                            r.nq = bench_local.getNq();
+                            r.k = bench_local.getK();
                             r.pq_train_ratio = tr_v;
                             results.push_back(r);
                           }
@@ -1974,10 +2141,10 @@ public:
                         auto r = bench_local.testHNSWRaBitQ(hM, efC_v, efS_v,
                                                             qb_v, centered);
                         if (r.build_time >= 0) {
-                          r.dim = dim_v;
-                          r.nb = nb_v;
-                          r.nq = nq_v;
-                          r.k = k_v;
+                          r.dim = bench_local.getDim();
+                          r.nb = bench_local.getNb();
+                          r.nq = bench_local.getNq();
+                          r.k = bench_local.getK();
                           results.push_back(r);
                         }
                       }
@@ -1992,10 +2159,10 @@ public:
                 if (contains("ivf_flat")) {
                   auto r = bench_local.testIVFFlat(nl_v, np_v);
                   if (r.build_time >= 0) {
-                    r.dim = dim_v;
-                    r.nb = nb_v;
-                    r.nq = nq_v;
-                    r.k = k_v;
+                    r.dim = bench_local.getDim();
+                    r.nb = bench_local.getNb();
+                    r.nq = bench_local.getNq();
+                    r.k = bench_local.getK();
                     results.push_back(r);
                   }
                 }
@@ -2004,10 +2171,10 @@ public:
                 for (int qtype_v : ivf_sq_types) {
                   auto r = bench_local.testIVFSQ(nl_v, np_v, qtype_v);
                   if (r.build_time >= 0) {
-                    r.dim = dim_v;
-                    r.nb = nb_v;
-                    r.nq = nq_v;
-                    r.k = k_v;
+                    r.dim = bench_local.getDim();
+                    r.nb = bench_local.getNb();
+                    r.nq = bench_local.getNq();
+                    r.k = bench_local.getK();
                     results.push_back(r);
                   }
                 }
@@ -2018,10 +2185,10 @@ public:
                         auto r = bench_local.testIVFPQ(nl_v, np_v, m_v, nbits_v,
                                                        tr_v);
                         if (r.build_time >= 0) {
-                          r.dim = dim_v;
-                          r.nb = nb_v;
-                          r.nq = nq_v;
-                          r.k = k_v;
+                          r.dim = bench_local.getDim();
+                          r.nb = bench_local.getNb();
+                          r.nq = bench_local.getNq();
+                          r.k = bench_local.getK();
                           r.pq_train_ratio = tr_v;
                           results.push_back(r);
                         }
@@ -2036,10 +2203,10 @@ public:
                       auto r =
                           bench_local.testIVFRaBitQ(nl_v, np_v, qb_v, centered);
                       if (r.build_time >= 0) {
-                        r.dim = dim_v;
-                        r.nb = nb_v;
-                        r.nq = nq_v;
-                        r.k = k_v;
+                        r.dim = bench_local.getDim();
+                        r.nb = bench_local.getNb();
+                        r.nq = bench_local.getNq();
+                        r.k = bench_local.getK();
                         results.push_back(r);
                       }
                     }
@@ -2057,10 +2224,10 @@ public:
                           auto r = bench_local.testIVFRaBitQRefine(
                               nl_v, np_v, qb_v, centered, rt, rk);
                           if (r.build_time >= 0) {
-                            r.dim = dim_v;
-                            r.nb = nb_v;
-                            r.nq = nq_v;
-                            r.k = k_v;
+                            r.dim = bench_local.getDim();
+                            r.nb = bench_local.getNb();
+                            r.nq = bench_local.getNq();
+                            r.k = bench_local.getK();
                             results.push_back(r);
                           }
                         }
@@ -2077,10 +2244,10 @@ public:
                   bool centered = centered_flag != 0;
                   auto r = bench_local.testRaBitQ(qb_v, centered);
                   if (r.build_time >= 0) {
-                    r.dim = dim_v;
-                    r.nb = nb_v;
-                    r.nq = nq_v;
-                    r.k = k_v;
+                    r.dim = bench_local.getDim();
+                    r.nb = bench_local.getNb();
+                    r.nq = bench_local.getNq();
+                    r.k = bench_local.getK();
                     results.push_back(r);
                   }
                 }
@@ -2656,6 +2823,9 @@ int main(int argc, char **argv) {
       nexts(opt.vecml_base_path);
     } else if (a == "--vecml-license") {
       nexts(opt.vecml_license_path);
+    } else if (a == "--sift1m-dir") {
+      nexts(opt.sift1m_dir);
+      if (!opt.sift1m_dir.empty()) opt.use_sift1m = true;
     } else if (a == "--mt-threads") {
       std::string s;
       nexts(s);
@@ -2715,6 +2885,7 @@ int main(int argc, char **argv) {
              "(contains lib and headers)\n"
              "  --vecml-license PATH           path to VecML license file "
              "(optional, default: license.txt)\n";
+      std::cout << "  --sift1m-dir PATH           load SIFT1M dataset from PATH (expects sift_base.fvecs, sift_query.fvecs, sift_groundtruth.ivecs)\n";
       std::cout << "  --mt-threads INT             threads for multi-thread "
                    "search across "
                    "all selected methods (default: hardware threads)\n";

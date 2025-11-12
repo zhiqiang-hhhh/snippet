@@ -9,7 +9,7 @@ extern "C" {
 typedef void* vecml_ctx_t;
 
 // Create and return a VecML context. Returns nullptr on error.
-vecml_ctx_t vecml_create(const char* base_path, const char* license_path);
+vecml_ctx_t vecml_create(const char* base_path, const char* license_path, bool fast_index);
 
 // Add data: `data` is n * dim floats, `ids` is array of n int64 ids (can be nullptr to use 0..n-1).
 // Returns 0 on success, non-zero on error.
