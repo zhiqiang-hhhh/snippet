@@ -194,6 +194,10 @@ struct Options {
   // by dim, nb, nq, k options (nb/nq/k act as upper bounds if set).
   bool use_sift1m = false;
   std::string sift1m_dir; // e.g., "sift1M"
+  // Optional dataset limiting/override when using SIFT1M (defaults: off)
+  int sift_nb_limit = -1;     // if >0, limit number of base vectors
+  int sift_nq_limit = -1;     // if >0, limit number of queries
+  int sift_k_override = -1;   // if >0, override K per query (cap by GT)
 
   // IVF parameters (for IVF-Flat / IVF-PQ / IVF-SQ)
   int ivf_nlist = 256;
@@ -252,29 +256,31 @@ private:
 public:
   PQBenchmark(int dim = 128, int nb = 20000, int nq = 500, int k = 10,
               bool transpose_centroid = false, const std::string &data_dir = "",
-              const std::string &load_dir = "", int mt_threads_option = 0)
+              const std::string &load_dir = "", int mt_threads_option = 0,
+              bool skip_init = false)
       : dim(dim), nb(nb), nq(nq), k(k), transpose_centroid(transpose_centroid),
         mt_threads(mt_threads_option), save_data_dir(data_dir) {
     std::cout << "=== HNSW Index Types Benchmark (C++) ===" << std::endl;
     std::cout << "配置: dim=" << dim << ", nb=" << nb << ", nq=" << nq
               << ", k=" << k << std::endl;
-
-    if (!load_dir.empty()) {
-      std::cout << "从 " << load_dir << " 加载测试数据..." << std::endl;
-      if (loadTestData(load_dir)) {
-        std::cout << "数据加载成功!" << std::endl;
+    if (!skip_init) {
+      if (!load_dir.empty()) {
+        std::cout << "从 " << load_dir << " 加载测试数据..." << std::endl;
+        if (loadTestData(load_dir)) {
+          std::cout << "数据加载成功!" << std::endl;
+        } else {
+          std::cout << "数据加载失败，生成新数据..." << std::endl;
+          generateData();
+          computeGroundTruth();
+        }
       } else {
-        std::cout << "数据加载失败，生成新数据..." << std::endl;
         generateData();
         computeGroundTruth();
       }
-    } else {
-      generateData();
-      computeGroundTruth();
-    }
 
-    if (!save_data_dir.empty()) {
-      saveTestData();
+      if (!save_data_dir.empty()) {
+        saveTestData();
+      }
     }
   }
 
@@ -682,6 +688,30 @@ public:
     return recall_sum / nq;
   }
 
+  // Standard 1-NN recall@K: fraction of queries where the true nearest
+  // neighbor (ground_truth's first entry per query) appears in the top-K
+  // predicted labels. Monotonically non-decreasing with K and within [0,1].
+  double computeRecall1NN(const std::vector<faiss::idx_t> &pred_labels,
+                          int top_k) {
+    if (nq <= 0 || k <= 0 || top_k <= 0)
+      return 0.0;
+    int K = std::min(top_k, k);
+    int hit_count = 0;
+    for (int i = 0; i < nq; ++i) {
+      faiss::idx_t true_nn = ground_truth[i * k + 0];
+      bool hit = false;
+      for (int j = 0; j < K; ++j) {
+        if (pred_labels[i * k + j] == true_nn) {
+          hit = true;
+          break;
+        }
+      }
+      if (hit)
+        ++hit_count;
+    }
+    return nq > 0 ? (double)hit_count / (double)nq : 0.0;
+  }
+
   struct MultiThreadResult {
     int threads = 0;
     double ms_per_query = 0.0;
@@ -867,9 +897,9 @@ public:
       r.search_time_ms =
           std::chrono::duration<double, std::milli>(t1 - t0).count() / nq;
 
-      r.recall_1 = computeRecall(labels, ground_truth, 1);
-      r.recall_5 = computeRecall(labels, ground_truth, 5);
-      r.recall_k = computeRecall(labels, ground_truth, k);
+  r.recall_1 = computeRecall1NN(labels, 1);
+  r.recall_5 = computeRecall1NN(labels, 5);
+  r.recall_k = computeRecall1NN(labels, k);
 
       // Serialize index to a temporary file to measure real memory footprint
       // (including graph + codes)
@@ -942,9 +972,9 @@ public:
       r.search_time_ms =
           std::chrono::duration<double, std::milli>(t1 - t0).count() / nq;
 
-      r.recall_1 = computeRecall(labels, ground_truth, 1);
-      r.recall_5 = computeRecall(labels, ground_truth, 5);
-      r.recall_k = computeRecall(labels, ground_truth, k);
+  r.recall_1 = computeRecall1NN(labels, 1);
+  r.recall_5 = computeRecall1NN(labels, 5);
+  r.recall_k = computeRecall1NN(labels, k);
 
       int bits = 8;
       using QT = faiss::ScalarQuantizer::QuantizerType;
@@ -1056,9 +1086,9 @@ public:
       r.search_time_ms =
           std::chrono::duration<double, std::milli>(t1 - t0).count() / nq;
 
-      r.recall_1 = computeRecall(labels, ground_truth, 1);
-      r.recall_5 = computeRecall(labels, ground_truth, 5);
-      r.recall_k = computeRecall(labels, ground_truth, k);
+  r.recall_1 = computeRecall1NN(labels, 1);
+  r.recall_5 = computeRecall1NN(labels, 5);
+  r.recall_k = computeRecall1NN(labels, k);
 
       r.mbs_on_disk = measureIndexSerializedSize(&index);
       if (nb > 0) {
@@ -1131,9 +1161,9 @@ public:
       r.search_time_ms =
           std::chrono::duration<double, std::milli>(t1 - t0).count() / nq;
 
-      r.recall_1 = computeRecall(labels, ground_truth, 1);
-      r.recall_5 = computeRecall(labels, ground_truth, 5);
-      r.recall_k = computeRecall(labels, ground_truth, k);
+  r.recall_1 = computeRecall1NN(labels, 1);
+  r.recall_5 = computeRecall1NN(labels, 5);
+  r.recall_k = computeRecall1NN(labels, k);
 
       r.mbs_on_disk = measureIndexSerializedSize(&index);
       if (nb > 0) {
@@ -1202,9 +1232,9 @@ public:
       r.search_time_ms =
           std::chrono::duration<double, std::milli>(t1 - t0).count() / nq;
 
-      r.recall_1 = computeRecall(labels, ground_truth, 1);
-      r.recall_5 = computeRecall(labels, ground_truth, 5);
-      r.recall_k = computeRecall(labels, ground_truth, k);
+  r.recall_1 = computeRecall1NN(labels, 1);
+  r.recall_5 = computeRecall1NN(labels, 5);
+  r.recall_k = computeRecall1NN(labels, k);
 
       r.mbs_on_disk = measureIndexSerializedSize(&index);
       // For IVF-Flat, vectors stored in float -> no compression
@@ -1281,9 +1311,9 @@ public:
       r.search_time_ms =
           std::chrono::duration<double, std::milli>(t1 - t0).count() / nq;
 
-      r.recall_1 = computeRecall(labels, ground_truth, 1);
-      r.recall_5 = computeRecall(labels, ground_truth, 5);
-      r.recall_k = computeRecall(labels, ground_truth, k);
+  r.recall_1 = computeRecall1NN(labels, 1);
+  r.recall_5 = computeRecall1NN(labels, 5);
+  r.recall_k = computeRecall1NN(labels, k);
 
       r.mbs_on_disk = measureIndexSerializedSize(&index);
       if (nb > 0) {
@@ -1352,9 +1382,9 @@ public:
       r.search_time_ms =
           std::chrono::duration<double, std::milli>(t1 - t0).count() / nq;
 
-      r.recall_1 = computeRecall(labels, ground_truth, 1);
-      r.recall_5 = computeRecall(labels, ground_truth, 5);
-      r.recall_k = computeRecall(labels, ground_truth, k);
+  r.recall_1 = computeRecall1NN(labels, 1);
+  r.recall_5 = computeRecall1NN(labels, 5);
+  r.recall_k = computeRecall1NN(labels, k);
 
       r.mbs_on_disk = measureIndexSerializedSize(&index);
       if (nb > 0) {
@@ -1448,9 +1478,9 @@ public:
       std::cout << "    调试: nprobe=" << sp.nprobe << ", qb=" << (int)sp.qb
                 << ", centered=" << sp.centered << std::endl;
 
-      r.recall_1 = computeRecall(labels, ground_truth, 1);
-      r.recall_5 = computeRecall(labels, ground_truth, 5);
-      r.recall_k = computeRecall(labels, ground_truth, k);
+  r.recall_1 = computeRecall1NN(labels, 1);
+  r.recall_5 = computeRecall1NN(labels, 5);
+  r.recall_k = computeRecall1NN(labels, k);
 
       r.mbs_on_disk = measureIndexSerializedSize(idx_rr.get());
       if (nb > 0) {
@@ -1732,11 +1762,6 @@ public:
       r.train_time = 0.0; // no train step in VecML
       r.build_time = r.add_time;
 
-      // Get file size after adding data
-      double disk_mb = vecml_get_disk_mb(ctx);
-      std::cerr << "vecml_add_data: total disk usage after add: " << disk_mb
-                << " MB\n";
-
       // Search timing
       std::vector<long> out_ids((size_t)nq * k, -1);
       auto t_s0 = std::chrono::high_resolution_clock::now();
@@ -1828,10 +1853,9 @@ public:
             mt_labels[i] =
                 mt_out[i] >= 0 ? static_cast<faiss::idx_t>(mt_out[i]) : -1;
           }
-          double mt_recall_1 = computeRecall(mt_labels, ground_truth, 1);
-          double mt_recall_5 =
-              computeRecall(mt_labels, ground_truth, std::min(5, k));
-          double mt_recall_k = computeRecall(mt_labels, ground_truth, k);
+      double mt_recall_1 = computeRecall1NN(mt_labels, 1);
+      double mt_recall_5 = computeRecall1NN(mt_labels, std::min(5, k));
+      double mt_recall_k = computeRecall1NN(mt_labels, k);
           bool match = (mt_labels == labels);
 
           std::cout << std::fixed << std::setprecision(3)
@@ -1946,9 +1970,9 @@ public:
       for (int i = 0; i < nq * k; ++i) {
         labels[i] = out_ids[i] >= 0 ? static_cast<faiss::idx_t>(out_ids[i]) : -1;
       }
-      r.recall_1 = computeRecall(labels, ground_truth, 1);
-      r.recall_5 = computeRecall(labels, ground_truth, 5);
-      r.recall_k = computeRecall(labels, ground_truth, k);
+  r.recall_1 = computeRecall1NN(labels, 1);
+  r.recall_5 = computeRecall1NN(labels, 5);
+  r.recall_k = computeRecall1NN(labels, k);
 
       // Optional: MT smoke test mirrors testVecML
       int threads = mt_threads_option;
@@ -2088,6 +2112,10 @@ public:
     if (use_sift1m) {
       // dim is determined by dataset; avoid redundant dim sweeps
       dim_list = {opt.dim};
+      // Ignore nb/nq/k CLI under SIFT1M; dataset decides sizes.
+      nb_list = {opt.nb};
+      nq_list = {opt.nq};
+      k_list = {opt.k};
     }
 
     // Iterate over dataset-level combinations first: dim, nb, nq, k
@@ -2098,9 +2126,13 @@ public:
             // Rebuild benchmark data for each dataset combo
             PQBenchmark bench_local(dim_v, nb_v, nq_v, k_v,
                                     opt.transpose_centroid, opt.save_data_dir,
-                                    opt.load_data_dir, opt.mt_threads);
+                                    opt.load_data_dir, opt.mt_threads,
+                                    /*skip_init=*/use_sift1m);
             if (use_sift1m) {
-              if (!bench_local.loadSift1M(opt.sift1m_dir, nb_v, nq_v, k_v)) {
+              // Load dataset, optionally applying user-provided limits.
+              if (!bench_local.loadSift1M(opt.sift1m_dir, opt.sift_nb_limit,
+                                          opt.sift_nq_limit,
+                                          opt.sift_k_override)) {
                 std::cerr << "SIFT1M 加载失败，跳过该组合" << std::endl;
                 continue;
               }
@@ -2286,10 +2318,11 @@ public:
               auto vr = bench_local.testVecML(
                   opt.vecml_base_path, opt.vecml_license_path, opt.mt_threads);
               if (vr.build_time >= 0) {
-                vr.dim = dim_v;
-                vr.nb = nb_v;
-                vr.nq = nq_v;
-                vr.k = k_v;
+                vr.dim = bench_local.getDim();
+                vr.nb = bench_local.getNb();
+                vr.nq = bench_local.getNq();
+                vr.k = bench_local.getK();
+                vr.dataset = bench_local.getDatasetName();
                 results.push_back(vr);
               }
 #else
@@ -2310,10 +2343,11 @@ public:
                   opt.vecml_base_path, opt.vecml_license_path,
                   opt.mt_threads);
               if (fr.build_time >= 0) {
-                fr.dim = dim_v;
-                fr.nb = nb_v;
-                fr.nq = nq_v;
-                fr.k = k_v;
+                fr.dim = bench_local.getDim();
+                fr.nb = bench_local.getNb();
+                fr.nq = bench_local.getNq();
+                fr.k = bench_local.getK();
+                fr.dataset = bench_local.getDatasetName();
                 results.push_back(fr);
               }
 #else
@@ -2854,6 +2888,15 @@ int main(int argc, char **argv) {
     } else if (a == "--sift1m-dir") {
       nexts(opt.sift1m_dir);
       if (!opt.sift1m_dir.empty()) opt.use_sift1m = true;
+    } else if (a == "--sift1m-nb-limit") {
+      next(opt.sift_nb_limit);
+      if (opt.sift_nb_limit < 0) opt.sift_nb_limit = -1;
+    } else if (a == "--sift1m-nq-limit") {
+      next(opt.sift_nq_limit);
+      if (opt.sift_nq_limit < 0) opt.sift_nq_limit = -1;
+    } else if (a == "--sift1m-k-override") {
+      next(opt.sift_k_override);
+      if (opt.sift_k_override < 0) opt.sift_k_override = -1;
     } else if (a == "--mt-threads") {
       std::string s;
       nexts(s);
@@ -2913,7 +2956,10 @@ int main(int argc, char **argv) {
              "(contains lib and headers)\n"
              "  --vecml-license PATH           path to VecML license file "
              "(optional, default: license.txt)\n";
-      std::cout << "  --sift1m-dir PATH           load SIFT1M dataset from PATH (expects sift_base.fvecs, sift_query.fvecs, sift_groundtruth.ivecs)\n";
+  std::cout << "  --sift1m-dir PATH           load SIFT1M dataset from PATH (expects sift_base.fvecs, sift_query.fvecs, sift_groundtruth.ivecs)\n";
+  std::cout << "  --sift1m-nb-limit INT       optional: limit number of base vectors to first INT (default off)\n";
+  std::cout << "  --sift1m-nq-limit INT       optional: limit number of queries to first INT (default off)\n";
+  std::cout << "  --sift1m-k-override INT     optional: override top-K per query (capped by ground truth K)\n";
       std::cout << "  --mt-threads INT             threads for multi-thread "
                    "search across "
                    "all selected methods (default: hardware threads)\n";
@@ -2922,8 +2968,11 @@ int main(int argc, char **argv) {
   }
 
   try {
+    // Avoid generating synthetic data at top-level; per-combination
+    // instances will handle data init (and SIFT1M load if requested).
     PQBenchmark bench(opt.dim, opt.nb, opt.nq, opt.k, opt.transpose_centroid,
-                      opt.save_data_dir, opt.load_data_dir, opt.mt_threads);
+                      opt.save_data_dir, opt.load_data_dir, opt.mt_threads,
+                      /*skip_init=*/true);
     auto results = bench.runIndexTypeBenchmarks(opt);
 
     // Note: VecML tests are now executed per-dataset inside
