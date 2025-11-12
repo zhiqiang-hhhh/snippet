@@ -25,12 +25,12 @@ struct VecMLHandle {
   bool use_fast_index = false;
   float fast_shrink_rate = 0.4f;
   int fast_max_samples = 100000;
-  int fast_index_threads = 1;
+  int fast_index_threads = 16;
 };
 
 extern "C" {
 
-vecml_ctx_t vecml_create(const char *base_path, const char *license_path) {
+vecml_ctx_t vecml_create(const char *base_path, const char *license_path, bool fast_index) {
   try {
     // Clean up any existing test database (actually remove the directory so
     // we don't accidentally load an old index with mismatched settings).
