@@ -1,9 +1,9 @@
 #include "vecml_shim/vecml_shim.h"
+#include <filesystem>
 #include <iostream>
 #include <memory>
 #include <string>
 #include <vector>
-#include <filesystem>
 
 #ifdef __has_include
 #if __has_include(<fluffy_interface.h>)
@@ -19,12 +19,13 @@ using namespace std;
 struct VecMLHandle {
   std::unique_ptr<fluffy::FluffyInterface> api;
   std::string index_name; // name of the attached index to use for searches
-  std::string base_path; // store base path provided at creation for disk-size queries
+  std::string
+      base_path; // store base path provided at creation for disk-size queries
 };
 
 extern "C" {
 
-vecml_ctx_t vecml_create(const char* base_path, const char* license_path) {
+vecml_ctx_t vecml_create(const char *base_path, const char *license_path) {
   try {
     // Clean up any existing test database (actually remove the directory so
     // we don't accidentally load an old index with mismatched settings).
@@ -33,25 +34,30 @@ vecml_ctx_t vecml_create(const char* base_path, const char* license_path) {
         std::error_code ec;
         std::filesystem::remove_all(base_path, ec);
         if (ec) {
-          std::cerr << "vecml_create: failed to remove existing base path " << base_path
-                    << " error=" << ec.message() << "\n";
+          std::cerr << "vecml_create: failed to remove existing base path "
+                    << base_path << " error=" << ec.message() << "\n";
         } else {
-          std::cerr << "vecml_create: removed existing base path " << base_path << "\n";
+          std::cerr << "vecml_create: removed existing base path " << base_path
+                    << "\n";
         }
       } else {
         std::cerr << "vecml_create: base_path is null or empty\n";
       }
     } catch (const std::exception &e) {
-      std::cerr << "vecml_create: exception while removing base path: " << e.what() << "\n";
+      std::cerr << "vecml_create: exception while removing base path: "
+                << e.what() << "\n";
     }
-    VecMLHandle* h = new VecMLHandle();
-    h->api = std::make_unique<fluffy::FluffyInterface>(std::string(base_path), std::string(license_path));
+    VecMLHandle *h = new VecMLHandle();
+    h->api = std::make_unique<fluffy::FluffyInterface>(
+        std::string(base_path), std::string(license_path));
     h->base_path = base_path ? std::string(base_path) : std::string();
-    // Initialize the underlying Fluffy/VecML instance and attach a default index
-    // so subsequent add/search calls work without extra setup from the caller.
+    // Initialize the underlying Fluffy/VecML instance and attach a default
+    // index so subsequent add/search calls work without extra setup from the
+    // caller.
     fluffy::ErrorCode ec = h->api->init();
     if (ec != fluffy::ErrorCode::Success) {
-      std::cerr << "vecml_create error: init failed: " << static_cast<int>(ec) << std::endl;
+      std::cerr << "vecml_create error: init failed: " << static_cast<int>(ec)
+                << std::endl;
       delete h;
       return nullptr;
     }
@@ -63,15 +69,17 @@ vecml_ctx_t vecml_create(const char* base_path, const char* license_path) {
     std::string idx_name = "test_index";
     h->index_name = idx_name;
     return reinterpret_cast<vecml_ctx_t>(h);
-  } catch (const std::exception& e) {
+  } catch (const std::exception &e) {
     std::cerr << "vecml_create error: " << e.what() << std::endl;
     return nullptr;
   }
 }
 
-int vecml_add_data(vecml_ctx_t ctx, const float* data, int n, int dim, const long* ids) {
-  if (!ctx) return -1;
-  VecMLHandle* h = reinterpret_cast<VecMLHandle*>(ctx);
+int vecml_add_data(vecml_ctx_t ctx, const float *data, int n, int dim,
+                   const long *ids) {
+  if (!ctx)
+    return -1;
+  VecMLHandle *h = reinterpret_cast<VecMLHandle *>(ctx);
   try {
     // Ensure an index exists with the correct dimension and distance type.
     // If no index was attached earlier (or vector dim is unknown), attach
@@ -79,11 +87,12 @@ int vecml_add_data(vecml_ctx_t ctx, const float* data, int n, int dim, const lon
     // match Faiss's L2 baseline.
     if (h->api->get_vector_dim() == 0) {
       // cast to int to match the SDK overload - dim_t is an SDK typedef
-      fluffy::ErrorCode attach_ec = h->api->attach_index((int)dim, "dense",
-                                                         fluffy::DistanceFunctionType::Euclidean,
-                                                         h->index_name, 1);
+      fluffy::ErrorCode attach_ec = h->api->attach_index(
+          (int)dim, "dense", fluffy::DistanceFunctionType::Euclidean,
+          h->index_name, 1);
       if (attach_ec != fluffy::ErrorCode::Success) {
-        std::cerr << "vecml_add_data warning: attach_index returned " << static_cast<int>(attach_ec) << std::endl;
+        std::cerr << "vecml_add_data warning: attach_index returned "
+                  << static_cast<int>(attach_ec) << std::endl;
         // continue: add_data_batch may create index implicitly, but we tried
         // to make behavior explicit for correct metric/dim.
       }
@@ -97,105 +106,126 @@ int vecml_add_data(vecml_ctx_t ctx, const float* data, int n, int dim, const lon
       std::unique_ptr<fluffy::Vector> vec;
       fluffy::ErrorCode ec = h->api->build_vector_dense(embedding, vec);
       if (ec != fluffy::ErrorCode::Success || !vec) {
-        std::cerr << "vecml_add_data: build_vector_dense failed for index " << i << "\n";
+        std::cerr << "vecml_add_data: build_vector_dense failed for index " << i
+                  << "\n";
         return -2;
       }
       long id = ids ? ids[i] : i;
       std::string sid = std::string("id_") + std::to_string(id);
-      // set attribute id and keep the attribute string alive until set_attribute copies it
+      // set attribute id and keep the attribute string alive until
+      // set_attribute copies it
       std::string id_str = std::to_string(id);
-      vec->set_attribute("id", reinterpret_cast<const uint8_t*>(id_str.data()), id_str.size());
+      vec->set_attribute("id", reinterpret_cast<const uint8_t *>(id_str.data()),
+                         id_str.size());
       batch.emplace_back(sid, std::move(vec));
     }
 
-    std::vector<fluffy::ErrorCode> ecs = h->api->add_data_batch(batch, /*threads=*/16);
+    std::vector<fluffy::ErrorCode> ecs =
+        h->api->add_data_batch(batch, /*threads=*/16);
     // check results
     for (const auto &ec : ecs) {
       if (ec != fluffy::ErrorCode::Success) {
-        std::cerr << "vecml_add_data: add_data_batch returned error code " << static_cast<int>(ec) << std::endl;
+        std::cerr << "vecml_add_data: add_data_batch returned error code "
+                  << static_cast<int>(ec) << std::endl;
         // continue but report failure
       }
     }
     // Flush to ensure data is persisted/visible for subsequent searches
     fluffy::ErrorCode flush_ec = h->api->flush();
     if (flush_ec != fluffy::ErrorCode::Success) {
-      std::cerr << "vecml_add_data: flush returned " << static_cast<int>(flush_ec) << std::endl;
+      std::cerr << "vecml_add_data: flush returned "
+                << static_cast<int>(flush_ec) << std::endl;
     } else {
       std::cerr << "vecml_add_data: flush successful\n";
     }
 
     return 0;
-  } catch (const std::exception& e) {
+  } catch (const std::exception &e) {
     std::cerr << "vecml_add_data error: " << e.what() << std::endl;
     return -2;
   }
 }
 
-int vecml_search(vecml_ctx_t ctx, const float* queries, int nq, int dim, int k, long* out_ids) {
-  if (!ctx) return -1;
-  VecMLHandle* h = reinterpret_cast<VecMLHandle*>(ctx);
+int vecml_search(vecml_ctx_t ctx, const float *queries, int nq, int dim, int k,
+                 long *out_ids) {
+  if (!ctx)
+    return -1;
+  VecMLHandle *h = reinterpret_cast<VecMLHandle *>(ctx);
   try {
     // Build query vectors and Query objects
     std::vector<fluffy::Query> queries_vec;
-    std::vector<std::unique_ptr<fluffy::Vector>> qvecs_hold; // keep ownership alive
+    std::vector<std::unique_ptr<fluffy::Vector>>
+        qvecs_hold; // keep ownership alive
     queries_vec.reserve(nq);
     qvecs_hold.reserve(nq);
     for (int i = 0; i < nq; ++i) {
       std::vector<float> embedding;
-      embedding.assign(queries + (size_t)i * dim, queries + (size_t)i * dim + dim);
+      embedding.assign(queries + (size_t)i * dim,
+                       queries + (size_t)i * dim + dim);
       std::unique_ptr<fluffy::Vector> vec;
       fluffy::ErrorCode ec = h->api->build_vector_dense(embedding, vec);
       if (ec != fluffy::ErrorCode::Success || !vec) {
-        std::cerr << "vecml_search: build_vector_dense failed for query " << i << "\n";
+        std::cerr << "vecml_search: build_vector_dense failed for query " << i
+                  << "\n";
         return -2;
       }
-  fluffy::Query q;
+      fluffy::Query q;
       q.top_k = k;
-  q.vector = vec.get();
-  // Explicitly request Euclidean (L2) similarity so results align with
-  // the Faiss L2 baseline used by the benchmark.
-  q.similarity_measure = fluffy::DistanceFunctionType::Euclidean;
+      q.vector = vec.get();
+      // Explicitly request Euclidean (L2) similarity so results align with
+      // the Faiss L2 baseline used by the benchmark.
+      q.similarity_measure = fluffy::DistanceFunctionType::Euclidean;
       // default similarity_measure will be used
       queries_vec.push_back(q);
       qvecs_hold.push_back(std::move(vec));
     }
 
-  // Use the same index name attached during init (fallback to "test_index")
-  const std::string idx = h->index_name.empty() ? std::string("test_index") : h->index_name;
+    // Use the same index name attached during init (fallback to "test_index")
+    const std::string idx =
+        h->index_name.empty() ? std::string("test_index") : h->index_name;
 
-  // Perform single searches for each query and marshal results
-  for (int qi = 0; qi < nq; ++qi) {
-    fluffy::InterfaceQueryResults qr;
-    fluffy::ErrorCode sec = h->api->search(queries_vec[qi], qr, idx, 0.3f, 0.9f);
-    if (sec != fluffy::ErrorCode::Success) {
-      std::cerr << "vecml_search: search() failed for query " << qi << " code=" << static_cast<int>(sec) << std::endl;
-      // mark no results for this query
-      for (int t = 0; t < k; ++t) out_ids[(size_t)qi * k + t] = -1;
-      continue;
-    }
-    size_t found = 0;
-    for (size_t j = 0; j < qr.results.size() && found < (size_t)k; ++j) {
-      const std::string &sid = qr.results[j].string_id;
-      long id = -1;
-      size_t p = sid.find_last_of('_');
-      if (p != std::string::npos) {
-        try { id = std::stol(sid.substr(p+1)); } catch (...) { id = -1; }
+    // Perform single searches for each query and marshal results
+    for (int qi = 0; qi < nq; ++qi) {
+      fluffy::InterfaceQueryResults qr;
+      fluffy::ErrorCode sec =
+          h->api->search(queries_vec[qi], qr, idx, 0.3f, 1.0f);
+      if (sec != fluffy::ErrorCode::Success) {
+        std::cerr << "vecml_search: search() failed for query " << qi
+                  << " code=" << static_cast<int>(sec) << std::endl;
+        // mark no results for this query
+        for (int t = 0; t < k; ++t)
+          out_ids[(size_t)qi * k + t] = -1;
+        continue;
       }
-      out_ids[(size_t)qi * k + found] = id;
-      ++found;
+      size_t found = 0;
+      for (size_t j = 0; j < qr.results.size() && found < (size_t)k; ++j) {
+        const std::string &sid = qr.results[j].string_id;
+        long id = -1;
+        size_t p = sid.find_last_of('_');
+        if (p != std::string::npos) {
+          try {
+            id = std::stol(sid.substr(p + 1));
+          } catch (...) {
+            id = -1;
+          }
+        }
+        out_ids[(size_t)qi * k + found] = id;
+        ++found;
+      }
+      for (size_t t = found; t < (size_t)k; ++t)
+        out_ids[(size_t)qi * k + t] = -1;
     }
-    for (size_t t = found; t < (size_t)k; ++t) out_ids[(size_t)qi * k + t] = -1;
-  }
-  return 0;
-  } catch (const std::exception& e) {
+    return 0;
+  } catch (const std::exception &e) {
     std::cerr << "vecml_search error: " << e.what() << std::endl;
     return -3;
   }
 }
 
 void vecml_destroy(vecml_ctx_t ctx) {
-  if (!ctx) return;
-  VecMLHandle* h = reinterpret_cast<VecMLHandle*>(ctx);
+  if (!ctx)
+    return;
+  VecMLHandle *h = reinterpret_cast<VecMLHandle *>(ctx);
   delete h;
 }
 
@@ -204,20 +234,27 @@ void vecml_destroy(vecml_ctx_t ctx) {
 extern "C" {
 
 double vecml_get_disk_mb(vecml_ctx_t ctx) {
-  if (!ctx) return -1.0;
-  VecMLHandle* h = reinterpret_cast<VecMLHandle*>(ctx);
+  if (!ctx)
+    return -1.0;
+  VecMLHandle *h = reinterpret_cast<VecMLHandle *>(ctx);
   try {
-    if (h->base_path.empty()) return -1.0;
+    if (h->base_path.empty())
+      return -1.0;
     std::uintmax_t total = 0;
     std::error_code ec;
-    for (auto it = std::filesystem::recursive_directory_iterator(h->base_path, std::filesystem::directory_options::skip_permission_denied, ec);
-         it != std::filesystem::recursive_directory_iterator(); it.increment(ec)) {
-      if (ec) continue;
+    for (auto it = std::filesystem::recursive_directory_iterator(
+             h->base_path,
+             std::filesystem::directory_options::skip_permission_denied, ec);
+         it != std::filesystem::recursive_directory_iterator();
+         it.increment(ec)) {
+      if (ec)
+        continue;
       const auto &entry = *it;
       if (entry.is_regular_file(ec)) {
         std::error_code fec;
         auto sz = std::filesystem::file_size(entry.path(), fec);
-        if (!fec) total += sz;
+        if (!fec)
+          total += sz;
       }
     }
     double mb = static_cast<double>(total) / (1024.0 * 1024.0);

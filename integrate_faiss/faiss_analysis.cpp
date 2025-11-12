@@ -7,6 +7,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdlib>
+#include <ctime>
 #include <faiss/IndexFlat.h>
 #include <faiss/IndexHNSW.h>
 #include <faiss/IndexIVF.h>
@@ -22,10 +23,9 @@
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
-#include <ctime>
 #include <iostream>
-#include <mutex>
 #include <memory>
+#include <mutex>
 #include <random>
 #include <sstream>
 #include <string>
@@ -530,9 +530,8 @@ public:
     }
 
     result.threads = threads;
-    result.labels.assign(static_cast<std::size_t>(nq) *
-                             static_cast<std::size_t>(k),
-                         -1);
+    result.labels.assign(
+        static_cast<std::size_t>(nq) * static_cast<std::size_t>(k), -1);
     std::vector<float> distances(static_cast<std::size_t>(nq) *
                                  static_cast<std::size_t>(k));
     std::vector<std::thread> workers;
@@ -608,18 +607,16 @@ public:
     r.mt_threads = mt.threads;
     r.mt_search_time_ms = mt.ms_per_query;
     r.mt_recall_k = computeRecall(mt.labels, ground_truth, k);
-    r.mt_recall_1 =
-        (k > 0) ? computeRecall(mt.labels, ground_truth, 1) : 0.0;
+    r.mt_recall_1 = (k > 0) ? computeRecall(mt.labels, ground_truth, 1) : 0.0;
     int recall_at_5 = std::min(5, k);
-    r.mt_recall_5 =
-        (recall_at_5 > 0)
-            ? computeRecall(mt.labels, ground_truth, recall_at_5)
-            : 0.0;
+    r.mt_recall_5 = (recall_at_5 > 0)
+                        ? computeRecall(mt.labels, ground_truth, recall_at_5)
+                        : 0.0;
     bool match = (mt.labels == baseline_labels);
     std::cout << std::fixed << std::setprecision(3)
               << "    [MT] threads=" << r.mt_threads
-              << ", search=" << r.mt_search_time_ms << " ms/query, recall@"
-              << k << "=" << r.mt_recall_k << std::endl;
+              << ", search=" << r.mt_search_time_ms << " ms/query, recall@" << k
+              << "=" << r.mt_recall_k << std::endl;
     if (!match) {
       std::cout << "    [WARN] " << method_name
                 << " multi-thread results differ from single-thread baseline"
@@ -718,11 +715,11 @@ public:
 
       MultiThreadResult mt_result;
       bool mt_ok = runMultiThreadSearch(
-          r.method, [&](std::size_t start, std::size_t count, float *dist_out,
-                         faiss::idx_t *label_out) {
+          r.method,
+          [&](std::size_t start, std::size_t count, float *dist_out,
+              faiss::idx_t *label_out) {
             index.search(static_cast<faiss::idx_t>(count),
-                         queries.data() +
-                             start * static_cast<std::size_t>(dim),
+                         queries.data() + start * static_cast<std::size_t>(dim),
                          k, dist_out, label_out);
           },
           mt_result);
@@ -806,11 +803,11 @@ public:
 
       MultiThreadResult mt_result;
       bool mt_ok = runMultiThreadSearch(
-          r.method, [&](std::size_t start, std::size_t count, float *dist_out,
-                         faiss::idx_t *label_out) {
+          r.method,
+          [&](std::size_t start, std::size_t count, float *dist_out,
+              faiss::idx_t *label_out) {
             index.search(static_cast<faiss::idx_t>(count),
-                         queries.data() +
-                             start * static_cast<std::size_t>(dim),
+                         queries.data() + start * static_cast<std::size_t>(dim),
                          k, dist_out, label_out);
           },
           mt_result);
@@ -822,7 +819,6 @@ public:
       r.build_time = -1;
     }
     return r;
-
   }
 
   // HNSW-PQ
@@ -904,11 +900,11 @@ public:
 
       MultiThreadResult mt_result;
       bool mt_ok = runMultiThreadSearch(
-          r.method, [&](std::size_t start, std::size_t count, float *dist_out,
-                         faiss::idx_t *label_out) {
+          r.method,
+          [&](std::size_t start, std::size_t count, float *dist_out,
+              faiss::idx_t *label_out) {
             index.search(static_cast<faiss::idx_t>(count),
-                         queries.data() +
-                             start * static_cast<std::size_t>(dim),
+                         queries.data() + start * static_cast<std::size_t>(dim),
                          k, dist_out, label_out);
           },
           mt_result);
@@ -983,11 +979,11 @@ public:
 
       MultiThreadResult mt_result;
       bool mt_ok = runMultiThreadSearch(
-          r.method, [&](std::size_t start, std::size_t count, float *dist_out,
-                         faiss::idx_t *label_out) {
+          r.method,
+          [&](std::size_t start, std::size_t count, float *dist_out,
+              faiss::idx_t *label_out) {
             index.search(static_cast<faiss::idx_t>(count),
-                         queries.data() +
-                             start * static_cast<std::size_t>(dim),
+                         queries.data() + start * static_cast<std::size_t>(dim),
                          k, dist_out, label_out);
           },
           mt_result);
@@ -1046,11 +1042,11 @@ public:
 
       MultiThreadResult mt_result;
       bool mt_ok = runMultiThreadSearch(
-          r.method, [&](std::size_t start, std::size_t count, float *dist_out,
-                         faiss::idx_t *label_out) {
+          r.method,
+          [&](std::size_t start, std::size_t count, float *dist_out,
+              faiss::idx_t *label_out) {
             index.search(static_cast<faiss::idx_t>(count),
-                         queries.data() +
-                             start * static_cast<std::size_t>(dim),
+                         queries.data() + start * static_cast<std::size_t>(dim),
                          k, dist_out, label_out);
           },
           mt_result);
@@ -1129,11 +1125,11 @@ public:
 
       MultiThreadResult mt_result;
       bool mt_ok = runMultiThreadSearch(
-          r.method, [&](std::size_t start, std::size_t count, float *dist_out,
-                         faiss::idx_t *label_out) {
+          r.method,
+          [&](std::size_t start, std::size_t count, float *dist_out,
+              faiss::idx_t *label_out) {
             index.search(static_cast<faiss::idx_t>(count),
-                         queries.data() +
-                             start * static_cast<std::size_t>(dim),
+                         queries.data() + start * static_cast<std::size_t>(dim),
                          k, dist_out, label_out);
           },
           mt_result);
@@ -1200,11 +1196,11 @@ public:
 
       MultiThreadResult mt_result;
       bool mt_ok = runMultiThreadSearch(
-          r.method, [&](std::size_t start, std::size_t count, float *dist_out,
-                         faiss::idx_t *label_out) {
+          r.method,
+          [&](std::size_t start, std::size_t count, float *dist_out,
+              faiss::idx_t *label_out) {
             index.search(static_cast<faiss::idx_t>(count),
-                         queries.data() +
-                             start * static_cast<std::size_t>(dim),
+                         queries.data() + start * static_cast<std::size_t>(dim),
                          k, dist_out, label_out);
           },
           mt_result);
@@ -1294,19 +1290,18 @@ public:
         r.compression_ratio = 0.0;
       }
 
-    faiss::IndexPreTransform *index_ptr = idx_rr.get();
-    faiss::IVFRaBitQSearchParameters sp_proto = sp;
+      faiss::IndexPreTransform *index_ptr = idx_rr.get();
+      faiss::IVFRaBitQSearchParameters sp_proto = sp;
       MultiThreadResult mt_result;
       bool mt_ok = runMultiThreadSearch(
-      r.method,
-      [&, index_ptr, sp_proto](std::size_t start, std::size_t count,
-                   float *dist_out,
-                   faiss::idx_t *label_out) {
-      faiss::IVFRaBitQSearchParameters params = sp_proto;
-      index_ptr->search(static_cast<faiss::idx_t>(count),
-                queries.data() +
-                  start * static_cast<std::size_t>(dim),
-                k, dist_out, label_out, &params);
+          r.method,
+          [&, index_ptr, sp_proto](std::size_t start, std::size_t count,
+                                   float *dist_out, faiss::idx_t *label_out) {
+            faiss::IVFRaBitQSearchParameters params = sp_proto;
+            index_ptr->search(static_cast<faiss::idx_t>(count),
+                              queries.data() +
+                                  start * static_cast<std::size_t>(dim),
+                              k, dist_out, label_out, &params);
           },
           mt_result);
       if (mt_ok) {
@@ -1441,8 +1436,8 @@ public:
       bool mt_ok = runMultiThreadSearch(
           r.method,
           [&, wrapper_ptr, ivf_sp_proto,
-             ref_sp_proto](std::size_t start, std::size_t count,
-                           float *dist_out, faiss::idx_t *label_out) {
+           ref_sp_proto](std::size_t start, std::size_t count, float *dist_out,
+                         faiss::idx_t *label_out) {
             faiss::IVFRaBitQSearchParameters ivf_params = ivf_sp_proto;
             faiss::IndexRefineSearchParameters refine_params = ref_sp_proto;
             refine_params.base_index_params = &ivf_params;
@@ -1512,17 +1507,16 @@ public:
                 << " s, 建索引(add)= " << r.add_time
                 << " s, 总构建= " << r.build_time << " s" << std::endl;
 
-    faiss::RaBitQSearchParameters sp_proto = sp;
+      faiss::RaBitQSearchParameters sp_proto = sp;
       MultiThreadResult mt_result;
       bool mt_ok = runMultiThreadSearch(
-      r.method,
-      [&, sp_proto](std::size_t start, std::size_t count, float *dist_out,
-            faiss::idx_t *label_out) {
-      faiss::RaBitQSearchParameters params = sp_proto;
-      index.search(static_cast<faiss::idx_t>(count),
-             queries.data() +
-               start * static_cast<std::size_t>(dim),
-             k, dist_out, label_out, &params);
+          r.method,
+          [&, sp_proto](std::size_t start, std::size_t count, float *dist_out,
+                        faiss::idx_t *label_out) {
+            faiss::RaBitQSearchParameters params = sp_proto;
+            index.search(static_cast<faiss::idx_t>(count),
+                         queries.data() + start * static_cast<std::size_t>(dim),
+                         k, dist_out, label_out, &params);
           },
           mt_result);
       if (mt_ok) {
@@ -1538,8 +1532,7 @@ public:
 #ifdef HAVE_VECML
   // VecML test using the C shim (vecml_shim)
   TestResult testVecML(const std::string &base_path,
-                       const std::string &license_path,
-                       int mt_threads_option) {
+                       const std::string &license_path, int mt_threads_option) {
     TestResult r{};
     r.method = "VecML";
     r.dim = dim;
@@ -1605,9 +1598,13 @@ public:
       // --mt-threads (mt_threads_option > 0). Do not auto-detect.
       int threads = mt_threads_option;
       if (threads <= 1) {
-        std::cout << "\n[VecML-MT] Skip multi-thread test: --mt-threads not provided or <=1" << std::endl;
+        std::cout << "\n[VecML-MT] Skip multi-thread test: --mt-threads not "
+                     "provided or <=1"
+                  << std::endl;
       } else if (nq <= 0 || k <= 0) {
-        std::cout << "\n[VecML-MT] Skip multi-thread test: invalid dataset configuration" << std::endl;
+        std::cout << "\n[VecML-MT] Skip multi-thread test: invalid dataset "
+                     "configuration"
+                  << std::endl;
       } else {
         std::cout << "\n=== VecML Multi-thread Smoke Test (threads=" << threads
                   << ") ===" << std::endl;
@@ -1638,7 +1635,8 @@ public:
             continue;
           }
           std::size_t start = cursor;
-          workers.emplace_back([&, start, count]() { run_chunk(start, count); });
+          workers.emplace_back(
+              [&, start, count]() { run_chunk(start, count); });
           cursor += count;
         }
         for (auto &worker : workers) {
@@ -1946,14 +1944,13 @@ public:
                 }
               }
             }
-#            // VecML: dataset-level test (VecML has no HNSW/IVF params, but
-#            // should still be exercised for different dim/nb/nq/k combos)
-#            // Only run VecML when explicitly requested via --which=vecml.
+#// VecML: dataset-level test (VecML has no HNSW/IVF params, but
+#// should still be exercised for different dim/nb/nq/k combos)
+#// Only run VecML when explicitly requested via --which=vecml.
             if (contains("vecml")) {
 #ifdef HAVE_VECML
-              auto vr = bench_local.testVecML(opt.vecml_base_path,
-                                              opt.vecml_license_path,
-                                              opt.mt_threads);
+              auto vr = bench_local.testVecML(
+                  opt.vecml_base_path, opt.vecml_license_path, opt.mt_threads);
               if (vr.build_time >= 0) {
                 vr.dim = dim_v;
                 vr.nb = nb_v;
@@ -1965,7 +1962,9 @@ public:
               // VecML requested but not compiled in; inform the user once.
               static bool warned_vecml = false;
               if (!warned_vecml) {
-                std::cerr << "VecML requested but not available in this build (HAVE_VECML not defined)." << std::endl;
+                std::cerr << "VecML requested but not available in this build "
+                             "(HAVE_VECML not defined)."
+                          << std::endl;
                 warned_vecml = true;
               }
 #endif
@@ -2049,8 +2048,8 @@ public:
            << std::setw(14) << "mbs_on_disk" << ' ' << std::setw(13)
            << "compression";
     if (show_mt_columns) {
-      header << ' ' << std::setw(11) << "mt_threads" << ' ' << std::setw(10)
-             << "mt_ms/q" << ' ' << std::setw(12) << "mt_recall@k";
+      header << ' ' << std::setw(11) << "mt_threads" << ' ' << std::setw(12)
+             << "mt_recall@k";
     }
     std::string header_line = header.str();
     std::cout << header_line << std::endl;
@@ -2098,12 +2097,10 @@ public:
         row << ' ' << std::setw(11)
             << (r.has_mt ? std::to_string(r.mt_threads) : std::string("NA"));
         if (r.has_mt) {
-          row << ' ' << std::setw(10) << std::fixed << std::setprecision(3)
-              << r.mt_search_time_ms;
           row << ' ' << std::setw(12) << std::fixed << std::setprecision(3)
               << r.mt_recall_k;
         } else {
-          row << ' ' << std::setw(10) << "NA" << ' ' << std::setw(12) << "NA";
+          row << ' ' << std::setw(12) << "NA";
         }
       }
 
@@ -2154,11 +2151,13 @@ public:
     auto csv_file = results_utils::openCsvAppend(path, existed);
     if (csv_file.is_open()) {
       if (!existed) {
-        csv_file << "method,dim,nb,nq,k,hnsw_M,efC,efS,ivf_nlist,ivf_nprobe,pq_m,"
-                    "pq_nbits,rabitq_qb,rabitq_centered,refine_k,refine_type,"
-                    "qtype,train_time,add_time,build_time,search_time_ms,recall_at_1,"
-                    "recall_at_5,recall_at_k,mbs_on_disk,compression_ratio,"
-                    "mt_threads,mt_search_time_ms,mt_recall_at_k,run_time\n";
+        csv_file
+            << "method,dim,nb,nq,k,hnsw_M,efC,efS,ivf_nlist,ivf_nprobe,pq_m,"
+               "pq_nbits,rabitq_qb,rabitq_centered,refine_k,refine_type,"
+               "qtype,train_time,add_time,build_time,search_time_ms,recall_at_"
+               "1,"
+               "recall_at_5,recall_at_k,mbs_on_disk,compression_ratio,"
+               "mt_threads,mt_search_time_ms,mt_recall_at_k,run_time\n";
       }
 
       std::string run_time = results_utils::currentRunTimeString();
@@ -2229,66 +2228,101 @@ struct IndexTest {
 struct HNSWFlatTest : public IndexTest {
   int m, efC, efS;
   HNSWFlatTest(int m_, int efC_, int efS_) : m(m_), efC(efC_), efS(efS_) {}
-  PQBenchmark::TestResult execute(PQBenchmark &bench) override { return bench.testHNSWFlat(m, efC, efS); }
+  PQBenchmark::TestResult execute(PQBenchmark &bench) override {
+    return bench.testHNSWFlat(m, efC, efS);
+  }
 };
 
 struct HNSWSQTest : public IndexTest {
   int qtype, m, efC, efS;
-  HNSWSQTest(int qtype_, int m_, int efC_, int efS_) : qtype(qtype_), m(m_), efC(efC_), efS(efS_) {}
-  PQBenchmark::TestResult execute(PQBenchmark &bench) override { return bench.testHNSWSQ(qtype, m, efC, efS); }
+  HNSWSQTest(int qtype_, int m_, int efC_, int efS_)
+      : qtype(qtype_), m(m_), efC(efC_), efS(efS_) {}
+  PQBenchmark::TestResult execute(PQBenchmark &bench) override {
+    return bench.testHNSWSQ(qtype, m, efC, efS);
+  }
 };
 
 struct HNSWPQTest : public IndexTest {
   int pq_m, pq_nbits, m, efC, efS;
   double tr;
   HNSWPQTest(int pq_m_, int pq_nbits_, int m_, int efC_, int efS_, double tr_)
-      : pq_m(pq_m_), pq_nbits(pq_nbits_), m(m_), efC(efC_), efS(efS_), tr(tr_) {}
-  PQBenchmark::TestResult execute(PQBenchmark &bench) override { return bench.testHNSWPQ(pq_m, pq_nbits, m, efC, efS, tr); }
+      : pq_m(pq_m_), pq_nbits(pq_nbits_), m(m_), efC(efC_), efS(efS_), tr(tr_) {
+  }
+  PQBenchmark::TestResult execute(PQBenchmark &bench) override {
+    return bench.testHNSWPQ(pq_m, pq_nbits, m, efC, efS, tr);
+  }
 };
 
 struct IVFFlatTest : public IndexTest {
   int nlist, nprobe;
   IVFFlatTest(int nlist_, int nprobe_) : nlist(nlist_), nprobe(nprobe_) {}
-  PQBenchmark::TestResult execute(PQBenchmark &bench) override { return bench.testIVFFlat(nlist, nprobe); }
+  PQBenchmark::TestResult execute(PQBenchmark &bench) override {
+    return bench.testIVFFlat(nlist, nprobe);
+  }
 };
 
 struct IVFSQTest : public IndexTest {
   int nlist, nprobe, qtype;
-  IVFSQTest(int nlist_, int nprobe_, int qtype_) : nlist(nlist_), nprobe(nprobe_), qtype(qtype_) {}
-  PQBenchmark::TestResult execute(PQBenchmark &bench) override { return bench.testIVFSQ(nlist, nprobe, qtype); }
+  IVFSQTest(int nlist_, int nprobe_, int qtype_)
+      : nlist(nlist_), nprobe(nprobe_), qtype(qtype_) {}
+  PQBenchmark::TestResult execute(PQBenchmark &bench) override {
+    return bench.testIVFSQ(nlist, nprobe, qtype);
+  }
 };
 
 struct IVFPQTest : public IndexTest {
-  int nlist, nprobe, m, nbits; double tr;
+  int nlist, nprobe, m, nbits;
+  double tr;
   IVFPQTest(int nlist_, int nprobe_, int m_, int nbits_, double tr_)
       : nlist(nlist_), nprobe(nprobe_), m(m_), nbits(nbits_), tr(tr_) {}
-  PQBenchmark::TestResult execute(PQBenchmark &bench) override { return bench.testIVFPQ(nlist, nprobe, m, nbits, tr); }
+  PQBenchmark::TestResult execute(PQBenchmark &bench) override {
+    return bench.testIVFPQ(nlist, nprobe, m, nbits, tr);
+  }
 };
 
 struct RaBitQTest : public IndexTest {
-  int qb; bool centered;
+  int qb;
+  bool centered;
   RaBitQTest(int qb_, bool centered_) : qb(qb_), centered(centered_) {}
-  PQBenchmark::TestResult execute(PQBenchmark &bench) override { return bench.testRaBitQ(qb, centered); }
+  PQBenchmark::TestResult execute(PQBenchmark &bench) override {
+    return bench.testRaBitQ(qb, centered);
+  }
 };
 
 struct IVFRaBitQTest : public IndexTest {
-  int nlist, nprobe, qb; bool centered;
-  IVFRaBitQTest(int nlist_, int nprobe_, int qb_, bool centered_) : nlist(nlist_), nprobe(nprobe_), qb(qb_), centered(centered_) {}
-  PQBenchmark::TestResult execute(PQBenchmark &bench) override { return bench.testIVFRaBitQ(nlist, nprobe, qb, centered); }
+  int nlist, nprobe, qb;
+  bool centered;
+  IVFRaBitQTest(int nlist_, int nprobe_, int qb_, bool centered_)
+      : nlist(nlist_), nprobe(nprobe_), qb(qb_), centered(centered_) {}
+  PQBenchmark::TestResult execute(PQBenchmark &bench) override {
+    return bench.testIVFRaBitQ(nlist, nprobe, qb, centered);
+  }
 };
 
 struct IVFRaBitQRefineTest : public IndexTest {
-  int nlist, nprobe, qb; bool centered; std::string refine_type; int refine_k;
-  IVFRaBitQRefineTest(int nlist_, int nprobe_, int qb_, bool centered_, const std::string &rt, int rk)
-      : nlist(nlist_), nprobe(nprobe_), qb(qb_), centered(centered_), refine_type(rt), refine_k(rk) {}
-  PQBenchmark::TestResult execute(PQBenchmark &bench) override { return bench.testIVFRaBitQRefine(nlist, nprobe, qb, centered, refine_type, refine_k); }
+  int nlist, nprobe, qb;
+  bool centered;
+  std::string refine_type;
+  int refine_k;
+  IVFRaBitQRefineTest(int nlist_, int nprobe_, int qb_, bool centered_,
+                      const std::string &rt, int rk)
+      : nlist(nlist_), nprobe(nprobe_), qb(qb_), centered(centered_),
+        refine_type(rt), refine_k(rk) {}
+  PQBenchmark::TestResult execute(PQBenchmark &bench) override {
+    return bench.testIVFRaBitQRefine(nlist, nprobe, qb, centered, refine_type,
+                                     refine_k);
+  }
 };
 
 #ifdef HAVE_VECML
 struct VecMLTestWrap : public IndexTest {
-  std::string base_path, license_path; int mt_threads;
-  VecMLTestWrap(const std::string &b, const std::string &l, int mt) : base_path(b), license_path(l), mt_threads(mt) {}
-  PQBenchmark::TestResult execute(PQBenchmark &bench) override { return bench.testVecML(base_path, license_path, mt_threads); }
+  std::string base_path, license_path;
+  int mt_threads;
+  VecMLTestWrap(const std::string &b, const std::string &l, int mt)
+      : base_path(b), license_path(l), mt_threads(mt) {}
+  PQBenchmark::TestResult execute(PQBenchmark &bench) override {
+    return bench.testVecML(base_path, license_path, mt_threads);
+  }
 };
 #endif
 
@@ -2517,16 +2551,16 @@ int main(int argc, char **argv) {
              "(contains lib and headers)\n"
              "  --vecml-license PATH           path to VecML license file "
              "(optional, default: license.txt)\n";
-  std::cout
-    << "  --mt-threads INT             threads for multi-thread search across "
-       "all selected methods (default: hardware threads)\n";
+      std::cout << "  --mt-threads INT             threads for multi-thread "
+                   "search across "
+                   "all selected methods (default: hardware threads)\n";
       return 0;
     }
   }
 
   try {
-  PQBenchmark bench(opt.dim, opt.nb, opt.nq, opt.k, opt.transpose_centroid,
-            opt.save_data_dir, opt.load_data_dir, opt.mt_threads);
+    PQBenchmark bench(opt.dim, opt.nb, opt.nq, opt.k, opt.transpose_centroid,
+                      opt.save_data_dir, opt.load_data_dir, opt.mt_threads);
     auto results = bench.runIndexTypeBenchmarks(opt);
 
     // Note: VecML tests are now executed per-dataset inside
