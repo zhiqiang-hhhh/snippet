@@ -2,6 +2,7 @@
 #include <filesystem>
 #include <iostream>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -17,7 +18,7 @@
 using namespace std;
 
 struct VecMLHandle {
-  std::unique_ptr<fluffy::FluffyInterface> api;
+  std::shared_ptr<fluffy::FluffyInterface> api;
   std::string index_name; // name of the attached index to use for searches
   std::string
       base_path; // store base path provided at creation for disk-size queries
@@ -32,47 +33,73 @@ extern "C" {
 
 vecml_ctx_t vecml_create(const char *base_path, const char *license_path, bool fast_index) {
   try {
-    // Clean up any existing test database (actually remove the directory so
-    // we don't accidentally load an old index with mismatched settings).
-    try {
-      if (base_path && !std::string(base_path).empty()) {
-        std::error_code ec;
-        std::filesystem::remove_all(base_path, ec);
-        if (ec) {
-          std::cerr << "vecml_create: failed to remove existing base path "
-                    << base_path << " error=" << ec.message() << "\n";
-        } else {
-          std::cerr << "vecml_create: removed existing base path " << base_path
-                    << "\n";
-        }
-      } else {
-        std::cerr << "vecml_create: base_path is null or empty\n";
-      }
-    } catch (const std::exception &e) {
-      std::cerr << "vecml_create: exception while removing base path: "
-                << e.what() << "\n";
-    }
+    // Global singleton for the underlying SDK to avoid re-init/destroy cycles
+    // that have shown instability when creating multiple contexts sequentially
+    // in one process. We reuse the same FluffyInterface across contexts.
+    static std::shared_ptr<fluffy::FluffyInterface> g_api;
+    static std::string g_base_path;
+    static std::string g_license_path;
+    static bool g_initialized = false;
+    static std::mutex g_mu;
+
+    std::lock_guard<std::mutex> lock(g_mu);
+
     VecMLHandle *h = new VecMLHandle();
-    h->api = std::make_unique<fluffy::FluffyInterface>(
-        std::string(base_path), std::string(license_path));
     h->base_path = base_path ? std::string(base_path) : std::string();
-    // Initialize the underlying Fluffy/VecML instance and attach a default
-    // index so subsequent add/search calls work without extra setup from the
-    // caller.
-    fluffy::ErrorCode ec = h->api->init();
-    if (ec != fluffy::ErrorCode::Success) {
-      std::cerr << "vecml_create error: init failed: " << static_cast<int>(ec)
-                << std::endl;
-      delete h;
-      return nullptr;
+
+    if (!g_api) {
+      // First time: clean up base path and create+init SDK
+      try {
+        if (base_path && !std::string(base_path).empty()) {
+          std::error_code fec;
+          std::filesystem::remove_all(base_path, fec);
+          if (fec) {
+            std::cerr << "vecml_create: failed to remove existing base path "
+                      << base_path << " error=" << fec.message() << "\n";
+          } else {
+            std::cerr << "vecml_create: removed existing base path "
+                      << base_path << "\n";
+          }
+        } else {
+          std::cerr << "vecml_create: base_path is null or empty\n";
+        }
+      } catch (const std::exception &e) {
+        std::cerr << "vecml_create: exception while removing base path: "
+                  << e.what() << "\n";
+      }
+
+      g_api = std::make_shared<fluffy::FluffyInterface>(
+          std::string(base_path), std::string(license_path));
+      g_base_path = base_path ? std::string(base_path) : std::string();
+      g_license_path = license_path ? std::string(license_path) : std::string();
+
+      fluffy::ErrorCode ec = g_api->init();
+      if (ec != fluffy::ErrorCode::Success) {
+        std::cerr << "vecml_create error: init failed: "
+                  << static_cast<int>(ec) << std::endl;
+        g_api.reset();
+        delete h;
+        return nullptr;
+      }
+      g_initialized = true;
+    } else {
+      // Reuse global SDK instance; warn on mismatched paths
+      if (base_path && !g_base_path.empty() && g_base_path != base_path) {
+        std::cerr << "vecml_create: warning: reusing global SDK with base_path="
+                  << g_base_path << ", ignored new base_path=" << base_path
+                  << "\n";
+      }
+      if (license_path && !g_license_path.empty() && g_license_path != license_path) {
+        std::cerr << "vecml_create: warning: reusing global SDK with license_path, ignoring new license\n";
+      }
+      std::cerr << "vecml_create: reusing global SDK instance\n";
     }
 
-    // Choose a default index name. Don't rely on get_vector_dim() here because
-    // no vectors have been added yet; attach_index will be invoked later from
-    // vecml_add_data when the vector dimension is known (to ensure the index
-    // is created with the correct dim and distance metric).
-    std::string idx_name = "test_index";
-    h->index_name = idx_name;
+    h->api = g_api; // share the same underlying SDK
+    // Choose a default index name. Actual attach happens in add_data.
+    h->index_name = "test_index";
+    // Configure fast-index preference for this handle; effective at add_data
+    h->use_fast_index = fast_index;
     return reinterpret_cast<vecml_ctx_t>(h);
   } catch (const std::exception &e) {
     std::cerr << "vecml_create error: " << e.what() << std::endl;
@@ -241,6 +268,17 @@ void vecml_destroy(vecml_ctx_t ctx) {
   if (!ctx)
     return;
   VecMLHandle *h = reinterpret_cast<VecMLHandle *>(ctx);
+  // Be defensive: ensure SDK destructor exceptions don't escape here.
+  try {
+    // Do not reset shared SDK here to avoid destabilizing subsequent tests;
+    // allow process exit to clean up the global instance.
+    h->api.reset();
+  } catch (const std::exception &e) {
+    std::cerr << "vecml_destroy: exception during api.reset(): " << e.what()
+              << std::endl;
+  } catch (...) {
+    std::cerr << "vecml_destroy: unknown exception during api.reset()" << std::endl;
+  }
   delete h;
 }
 

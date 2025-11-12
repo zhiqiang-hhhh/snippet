@@ -1949,10 +1949,6 @@ public:
       r.train_time = 0.0;
       r.build_time = r.add_time;
 
-      double disk_mb = vecml_get_disk_mb(ctx);
-      std::cerr << "vecml_fast_add_data: total disk usage after add: "
-                << disk_mb << " MB\n";
-
       std::vector<long> out_ids((size_t)nq * k, -1);
       auto t_s0 = std::chrono::high_resolution_clock::now();
       int sret = vecml_search(ctx, queries.data(), nq, dim, k, out_ids.data());
@@ -2339,8 +2335,11 @@ public:
             // VecML Fast Index test
             if (contains("vecml-fast-idx")) {
 #ifdef HAVE_VECML
-              auto fr = bench_local.testVecMLFastIdx(
-                  opt.vecml_base_path, opt.vecml_license_path,
+        // Use a separate subdirectory for fast-idx to avoid reusing
+        // files from the standard VecML run when both are requested.
+        auto fr = bench_local.testVecMLFastIdx(
+          opt.vecml_base_path.empty() ? std::string("") : (opt.vecml_base_path + "/fast_idx"),
+          opt.vecml_license_path,
                   opt.mt_threads);
               if (fr.build_time >= 0) {
                 fr.dim = bench_local.getDim();
