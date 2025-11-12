@@ -38,6 +38,8 @@
 #ifdef HAVE_VECML
 #include "vecml_shim/vecml_shim.h"
 #endif
+#include "cli_utils.h"
+#include "util/results_utils.h"
 
 // 通过序列化来估算索引内存占用：写到临时文件，取文件大小（MB）
 static double measureIndexSerializedSize(faiss::Index *index) {
@@ -63,6 +65,8 @@ static double measureIndexSerializedSize(faiss::Index *index) {
     return 0.0;
   }
 }
+
+// ---------------------------------------------------------------------------
 
 static double computeDirectorySizeMB(const std::string &path) {
   if (path.empty()) {
@@ -2146,21 +2150,10 @@ public:
 
   void saveResults(const std::vector<TestResult> &results,
                    const std::string &path) {
-    // Append results to CSV if file exists; otherwise create and write header.
-    bool exists = false;
-    {
-      std::ifstream in(path);
-      exists = in.good();
-    }
-
-    std::ofstream csv_file;
-    if (exists)
-      csv_file.open(path, std::ios::app);
-    else
-      csv_file.open(path, std::ios::out);
-
+    bool existed = false;
+    auto csv_file = results_utils::openCsvAppend(path, existed);
     if (csv_file.is_open()) {
-      if (!exists) {
+      if (!existed) {
         csv_file << "method,dim,nb,nq,k,hnsw_M,efC,efS,ivf_nlist,ivf_nprobe,pq_m,"
                     "pq_nbits,rabitq_qb,rabitq_centered,refine_k,refine_type,"
                     "qtype,train_time,add_time,build_time,search_time_ms,recall_at_1,"
@@ -2168,13 +2161,7 @@ public:
                     "mt_threads,mt_search_time_ms,mt_recall_at_k,run_time\n";
       }
 
-      // Single timestamp for this append operation
-      auto now = std::chrono::system_clock::now();
-      std::time_t t = std::chrono::system_clock::to_time_t(now);
-      std::tm tm = *std::localtime(&t);
-      std::ostringstream ts;
-      ts << std::put_time(&tm, "%Y-%m-%d %H:%M:%S");
-      std::string run_time = ts.str();
+      std::string run_time = results_utils::currentRunTimeString();
 
       for (const auto &r : results) {
         csv_file << r.method << "," << r.dim << "," << r.nb << "," << r.nq
@@ -2215,7 +2202,7 @@ public:
         csv_file << ',' << run_time << "\n";
       }
       csv_file.close();
-      if (exists)
+      if (existed)
         std::cout << "\n💾 结果已追加到: " << path << std::endl;
       else
         std::cout << "\n💾 结果已保存到: " << path << std::endl;
@@ -2225,60 +2212,87 @@ public:
   }
 };
 
-static int parseQType(const std::string &s) {
-  using QT = faiss::ScalarQuantizer::QuantizerType;
-  if (s == "QT_8bit")
-    return (int)QT::QT_8bit;
-  if (s == "QT_4bit")
-    return (int)QT::QT_4bit;
-  if (s == "QT_8bit_uniform")
-    return (int)QT::QT_8bit_uniform;
-  if (s == "QT_fp16")
-    return (int)QT::QT_fp16;
-  // fallback: try int
-  try {
-    return std::stoi(s);
-  } catch (...) {
-    return (int)QT::QT_8bit;
-  }
-}
+// ---------------------------------------------------------------------------
+// Lightweight OO test wrapper framework (moved here so PQBenchmark and
+// PQBenchmark::TestResult are already defined). Each algorithm is
+// represented as an IndexTest object that can be invoked with a
+// PQBenchmark instance. This is a small, incremental refactor: concrete
+// tests delegate to the existing bench_local.test* helpers while
+// providing a unified spot for future per-step overrides.
 
-static std::vector<std::string> splitCSV(const std::string &s) {
-  std::vector<std::string> out;
-  std::stringstream ss(s);
-  std::string item;
-  while (std::getline(ss, item, ',')) {
-    if (!item.empty())
-      out.push_back(item);
-  }
-  return out;
-}
+struct IndexTest {
+  virtual ~IndexTest() = default;
+  // Execute the full test using provided PQBenchmark which owns data.
+  virtual PQBenchmark::TestResult execute(PQBenchmark &bench) = 0;
+};
 
-static std::vector<int> toIntList(const std::string &s) {
-  std::vector<int> v;
-  auto parts = splitCSV(s);
-  v.reserve(parts.size());
-  for (auto &p : parts) {
-    try {
-      v.push_back(std::stoi(p));
-    } catch (...) {
-    }
-  }
-  return v;
-}
+struct HNSWFlatTest : public IndexTest {
+  int m, efC, efS;
+  HNSWFlatTest(int m_, int efC_, int efS_) : m(m_), efC(efC_), efS(efS_) {}
+  PQBenchmark::TestResult execute(PQBenchmark &bench) override { return bench.testHNSWFlat(m, efC, efS); }
+};
 
-static std::vector<double> toDoubleList(const std::string &s) {
-  std::vector<double> v;
-  auto parts = splitCSV(s);
-  v.reserve(parts.size());
-  for (auto &p : parts) {
-    try {
-      v.push_back(std::stod(p));
-    } catch (...) {
-    }
-  }
-  return v;
-}
+struct HNSWSQTest : public IndexTest {
+  int qtype, m, efC, efS;
+  HNSWSQTest(int qtype_, int m_, int efC_, int efS_) : qtype(qtype_), m(m_), efC(efC_), efS(efS_) {}
+  PQBenchmark::TestResult execute(PQBenchmark &bench) override { return bench.testHNSWSQ(qtype, m, efC, efS); }
+};
+
+struct HNSWPQTest : public IndexTest {
+  int pq_m, pq_nbits, m, efC, efS;
+  double tr;
+  HNSWPQTest(int pq_m_, int pq_nbits_, int m_, int efC_, int efS_, double tr_)
+      : pq_m(pq_m_), pq_nbits(pq_nbits_), m(m_), efC(efC_), efS(efS_), tr(tr_) {}
+  PQBenchmark::TestResult execute(PQBenchmark &bench) override { return bench.testHNSWPQ(pq_m, pq_nbits, m, efC, efS, tr); }
+};
+
+struct IVFFlatTest : public IndexTest {
+  int nlist, nprobe;
+  IVFFlatTest(int nlist_, int nprobe_) : nlist(nlist_), nprobe(nprobe_) {}
+  PQBenchmark::TestResult execute(PQBenchmark &bench) override { return bench.testIVFFlat(nlist, nprobe); }
+};
+
+struct IVFSQTest : public IndexTest {
+  int nlist, nprobe, qtype;
+  IVFSQTest(int nlist_, int nprobe_, int qtype_) : nlist(nlist_), nprobe(nprobe_), qtype(qtype_) {}
+  PQBenchmark::TestResult execute(PQBenchmark &bench) override { return bench.testIVFSQ(nlist, nprobe, qtype); }
+};
+
+struct IVFPQTest : public IndexTest {
+  int nlist, nprobe, m, nbits; double tr;
+  IVFPQTest(int nlist_, int nprobe_, int m_, int nbits_, double tr_)
+      : nlist(nlist_), nprobe(nprobe_), m(m_), nbits(nbits_), tr(tr_) {}
+  PQBenchmark::TestResult execute(PQBenchmark &bench) override { return bench.testIVFPQ(nlist, nprobe, m, nbits, tr); }
+};
+
+struct RaBitQTest : public IndexTest {
+  int qb; bool centered;
+  RaBitQTest(int qb_, bool centered_) : qb(qb_), centered(centered_) {}
+  PQBenchmark::TestResult execute(PQBenchmark &bench) override { return bench.testRaBitQ(qb, centered); }
+};
+
+struct IVFRaBitQTest : public IndexTest {
+  int nlist, nprobe, qb; bool centered;
+  IVFRaBitQTest(int nlist_, int nprobe_, int qb_, bool centered_) : nlist(nlist_), nprobe(nprobe_), qb(qb_), centered(centered_) {}
+  PQBenchmark::TestResult execute(PQBenchmark &bench) override { return bench.testIVFRaBitQ(nlist, nprobe, qb, centered); }
+};
+
+struct IVFRaBitQRefineTest : public IndexTest {
+  int nlist, nprobe, qb; bool centered; std::string refine_type; int refine_k;
+  IVFRaBitQRefineTest(int nlist_, int nprobe_, int qb_, bool centered_, const std::string &rt, int rk)
+      : nlist(nlist_), nprobe(nprobe_), qb(qb_), centered(centered_), refine_type(rt), refine_k(rk) {}
+  PQBenchmark::TestResult execute(PQBenchmark &bench) override { return bench.testIVFRaBitQRefine(nlist, nprobe, qb, centered, refine_type, refine_k); }
+};
+
+#ifdef HAVE_VECML
+struct VecMLTestWrap : public IndexTest {
+  std::string base_path, license_path; int mt_threads;
+  VecMLTestWrap(const std::string &b, const std::string &l, int mt) : base_path(b), license_path(l), mt_threads(mt) {}
+  PQBenchmark::TestResult execute(PQBenchmark &bench) override { return bench.testVecML(base_path, license_path, mt_threads); }
+};
+#endif
+
+// CLI parsing helpers moved to integrate_faiss/cli_utils.{h,cpp}
 
 static std::vector<PQBenchmark::TestResult> expandResultsWithMtVariants(
     const std::vector<PQBenchmark::TestResult> &results) {

@@ -59,7 +59,7 @@ target_link_libraries(test_hnswrabitq PRIVATE faiss)
 add_executable(sq sq.cpp)
 target_link_libraries(sq PRIVATE faiss)
 
-add_executable(faiss_analysis faiss_analysis.cpp)
+add_executable(faiss_analysis src/faiss_analysis.cpp util/cli_utils.cpp util/results_utils.cpp)
 target_link_libraries(faiss_analysis PRIVATE faiss Threads::Threads)
 
 # VecML (Fluffy) support: optional C shim to avoid C++ ABI conflicts
