@@ -22,6 +22,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
+#include <ctime>
 #include <iostream>
 #include <mutex>
 #include <memory>
@@ -517,9 +518,9 @@ public:
   bool runMultiThreadSearch(const std::string &method_name,
                             SearchShardFn &&search_shard,
                             MultiThreadResult &result) {
-    int threads = mt_threads > 0
-                      ? mt_threads
-                      : static_cast<int>(std::thread::hardware_concurrency());
+    // Require explicit --mt-threads to run multi-thread smoke tests. Do not
+    // auto-enable based on hardware_concurrency(): the user must opt-in.
+    int threads = mt_threads;
     if (threads <= 1 || nq <= 0 || k <= 0) {
       return false;
     }
@@ -1596,15 +1597,13 @@ public:
       r.recall_5 = computeRecall(labels, ground_truth, 5);
       r.recall_k = computeRecall(labels, ground_truth, k);
 
-      int threads = mt_threads_option > 0
-                         ? mt_threads_option
-                         : static_cast<int>(std::thread::hardware_concurrency());
+      // Only run multi-thread smoke test if the user explicitly provided
+      // --mt-threads (mt_threads_option > 0). Do not auto-detect.
+      int threads = mt_threads_option;
       if (threads <= 1) {
-        std::cout << "\n[VecML-MT] Skip multi-thread test: threads<=1"
-                  << std::endl;
+        std::cout << "\n[VecML-MT] Skip multi-thread test: --mt-threads not provided or <=1" << std::endl;
       } else if (nq <= 0 || k <= 0) {
-        std::cout << "\n[VecML-MT] Skip multi-thread test: invalid dataset configuration"
-                  << std::endl;
+        std::cout << "\n[VecML-MT] Skip multi-thread test: invalid dataset configuration" << std::endl;
       } else {
         std::cout << "\n=== VecML Multi-thread Smoke Test (threads=" << threads
                   << ") ===" << std::endl;
@@ -1943,9 +1942,10 @@ public:
                 }
               }
             }
-            // VecML: dataset-level test (VecML has no HNSW/IVF params, but
-            // should still be exercised for different dim/nb/nq/k combos)
-            if (contains("vecml") || !opt.vecml_base_path.empty()) {
+#            // VecML: dataset-level test (VecML has no HNSW/IVF params, but
+#            // should still be exercised for different dim/nb/nq/k combos)
+#            // Only run VecML when explicitly requested via --which=vecml.
+            if (contains("vecml")) {
 #ifdef HAVE_VECML
               auto vr = bench_local.testVecML(opt.vecml_base_path,
                                               opt.vecml_license_path,
@@ -2146,14 +2146,36 @@ public:
 
   void saveResults(const std::vector<TestResult> &results,
                    const std::string &path) {
-    std::ofstream csv_file(path);
+    // Append results to CSV if file exists; otherwise create and write header.
+    bool exists = false;
+    {
+      std::ifstream in(path);
+      exists = in.good();
+    }
+
+    std::ofstream csv_file;
+    if (exists)
+      csv_file.open(path, std::ios::app);
+    else
+      csv_file.open(path, std::ios::out);
+
     if (csv_file.is_open()) {
-      csv_file << "method,dim,nb,nq,k,hnsw_M,efC,efS,ivf_nlist,ivf_nprobe,pq_m,"
-                  "pq_nbits,rabitq_qb,rabitq_centered,refine_k,refine_type,"
-                  "qtype,train_"
-                  "time,add_time,build_time,search_time_ms,recall_at_1,"
-                  "recall_at_5,recall_at_k,mbs_on_disk,compression_ratio,"
-                  "mt_threads,mt_search_time_ms,mt_recall_at_k\n";
+      if (!exists) {
+        csv_file << "method,dim,nb,nq,k,hnsw_M,efC,efS,ivf_nlist,ivf_nprobe,pq_m,"
+                    "pq_nbits,rabitq_qb,rabitq_centered,refine_k,refine_type,"
+                    "qtype,train_time,add_time,build_time,search_time_ms,recall_at_1,"
+                    "recall_at_5,recall_at_k,mbs_on_disk,compression_ratio,"
+                    "mt_threads,mt_search_time_ms,mt_recall_at_k,run_time\n";
+      }
+
+      // Single timestamp for this append operation
+      auto now = std::chrono::system_clock::now();
+      std::time_t t = std::chrono::system_clock::to_time_t(now);
+      std::tm tm = *std::localtime(&t);
+      std::ostringstream ts;
+      ts << std::put_time(&tm, "%Y-%m-%d %H:%M:%S");
+      std::string run_time = ts.str();
+
       for (const auto &r : results) {
         csv_file << r.method << "," << r.dim << "," << r.nb << "," << r.nq
                  << "," << r.k << "," << r.hnsw_M << "," << r.efC << ","
@@ -2190,10 +2212,13 @@ public:
           csv_file << r.mt_recall_k;
         else
           csv_file << "NA";
-        csv_file << "\n";
+        csv_file << ',' << run_time << "\n";
       }
       csv_file.close();
-      std::cout << "\n💾 结果已保存到: " << path << std::endl;
+      if (exists)
+        std::cout << "\n💾 结果已追加到: " << path << std::endl;
+      else
+        std::cout << "\n💾 结果已保存到: " << path << std::endl;
     } else {
       std::cerr << "❌ 无法创建CSV文件" << std::endl;
     }
