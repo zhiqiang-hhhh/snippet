@@ -945,23 +945,21 @@ public:
       index.hnsw.efSearch = efS;
       std::vector<float> distances;
       std::vector<faiss::idx_t> labels;
-      bool skip_baseline = (mt_threads > 1);
-      if (!skip_baseline) {
-        distances.resize((size_t)nq * k);
-        labels.resize((size_t)nq * k);
-        log_step(tag, std::string("search start nq=") + std::to_string(nq) +
-                          ", k=" + std::to_string(k));
-        auto t0 = std::chrono::high_resolution_clock::now();
-        index.search(nq, queries.data(), k, distances.data(), labels.data());
-        auto t1 = std::chrono::high_resolution_clock::now();
-        r.search_time_ms =
-            std::chrono::duration<double, std::milli>(t1 - t0).count() / nq;
-        log_step(tag, std::string("search done, time=") +
-                          std::to_string(r.search_time_ms) + " ms/query");
-        r.recall_1 = computeRecall1NN(labels, 1);
-        r.recall_5 = computeRecall1NN(labels, 5);
-        r.recall_k = computeRecall1NN(labels, k);
-      }
+      // Always run single-thread baseline to populate serial metrics
+      distances.resize((size_t)nq * k);
+      labels.resize((size_t)nq * k);
+      log_step(tag, std::string("search start nq=") + std::to_string(nq) +
+                        ", k=" + std::to_string(k));
+      auto t0 = std::chrono::high_resolution_clock::now();
+      index.search(nq, queries.data(), k, distances.data(), labels.data());
+      auto t1 = std::chrono::high_resolution_clock::now();
+      r.search_time_ms =
+          std::chrono::duration<double, std::milli>(t1 - t0).count() / nq;
+      log_step(tag, std::string("search done, time=") +
+                        std::to_string(r.search_time_ms) + " ms/query");
+      r.recall_1 = computeRecall1NN(labels, 1);
+      r.recall_5 = computeRecall1NN(labels, 5);
+      r.recall_k = computeRecall1NN(labels, k);
 
       // Serialize index to a temporary file to measure real memory footprint
       // (including graph + codes)
@@ -988,9 +986,8 @@ public:
           },
           mt_result);
       if (mt_ok) {
-        applyMultiThreadMetrics(r.method, r,
-                                (labels.empty() ? nullptr : &labels), mt_result,
-                                /*adopt_as_primary_if_no_baseline=*/true);
+        applyMultiThreadMetrics(r.method, r, &labels, mt_result,
+                                /*adopt_as_primary_if_no_baseline=*/false);
       }
     } catch (const std::exception &e) {
       std::cerr << "    错误: " << e.what() << std::endl;
@@ -1038,24 +1035,22 @@ public:
       index.hnsw.efSearch = efS;
       std::vector<float> distances;
       std::vector<faiss::idx_t> labels;
-      bool skip_baseline = (mt_threads > 1);
-      if (!skip_baseline) {
-        distances.resize((size_t)nq * k);
-        labels.resize((size_t)nq * k);
-        log_step(tag, std::string("search start nq=") + std::to_string(nq) +
-                          ", k=" + std::to_string(k));
-        t0 = std::chrono::high_resolution_clock::now();
-        index.search(nq, queries.data(), k, distances.data(), labels.data());
-        t1 = std::chrono::high_resolution_clock::now();
-        r.search_time_ms =
-            std::chrono::duration<double, std::milli>(t1 - t0).count() / nq;
-        log_step(tag, std::string("search done, time=") +
-                          std::to_string(r.search_time_ms) + " ms/query");
+      // Always run baseline
+      distances.resize((size_t)nq * k);
+      labels.resize((size_t)nq * k);
+      log_step(tag, std::string("search start nq=") + std::to_string(nq) +
+                        ", k=" + std::to_string(k));
+      t0 = std::chrono::high_resolution_clock::now();
+      index.search(nq, queries.data(), k, distances.data(), labels.data());
+      t1 = std::chrono::high_resolution_clock::now();
+      r.search_time_ms =
+          std::chrono::duration<double, std::milli>(t1 - t0).count() / nq;
+      log_step(tag, std::string("search done, time=") +
+                        std::to_string(r.search_time_ms) + " ms/query");
 
-        r.recall_1 = computeRecall1NN(labels, 1);
-        r.recall_5 = computeRecall1NN(labels, 5);
-        r.recall_k = computeRecall1NN(labels, k);
-      }
+      r.recall_1 = computeRecall1NN(labels, 1);
+      r.recall_5 = computeRecall1NN(labels, 5);
+      r.recall_k = computeRecall1NN(labels, k);
 
       int bits = 8;
       using QT = faiss::ScalarQuantizer::QuantizerType;
@@ -1093,9 +1088,8 @@ public:
           },
           mt_result);
       if (mt_ok) {
-        applyMultiThreadMetrics(r.method, r,
-                                (labels.empty() ? nullptr : &labels), mt_result,
-                                /*adopt_as_primary_if_no_baseline=*/true);
+        applyMultiThreadMetrics(r.method, r, &labels, mt_result,
+                                /*adopt_as_primary_if_no_baseline=*/false);
       }
     } catch (const std::exception &e) {
       std::cerr << "    错误: " << e.what() << std::endl;
@@ -1171,24 +1165,22 @@ public:
       index.hnsw.efSearch = efS;
       std::vector<float> distances;
       std::vector<faiss::idx_t> labels;
-      bool skip_baseline = (mt_threads > 1);
-      if (!skip_baseline) {
-        distances.resize((size_t)nq * k);
-        labels.resize((size_t)nq * k);
-        log_step(tag, std::string("search start nq=") + std::to_string(nq) +
-                          ", k=" + std::to_string(k));
-        t0 = std::chrono::high_resolution_clock::now();
-        index.search(nq, queries.data(), k, distances.data(), labels.data());
-        t1 = std::chrono::high_resolution_clock::now();
-        r.search_time_ms =
-            std::chrono::duration<double, std::milli>(t1 - t0).count() / nq;
-        log_step(tag, std::string("search done, time=") +
-                          std::to_string(r.search_time_ms) + " ms/query");
+      // Always run baseline
+      distances.resize((size_t)nq * k);
+      labels.resize((size_t)nq * k);
+      log_step(tag, std::string("search start nq=") + std::to_string(nq) +
+                        ", k=" + std::to_string(k));
+      t0 = std::chrono::high_resolution_clock::now();
+      index.search(nq, queries.data(), k, distances.data(), labels.data());
+      t1 = std::chrono::high_resolution_clock::now();
+      r.search_time_ms =
+          std::chrono::duration<double, std::milli>(t1 - t0).count() / nq;
+      log_step(tag, std::string("search done, time=") +
+                        std::to_string(r.search_time_ms) + " ms/query");
 
-        r.recall_1 = computeRecall1NN(labels, 1);
-        r.recall_5 = computeRecall1NN(labels, 5);
-        r.recall_k = computeRecall1NN(labels, k);
-      }
+      r.recall_1 = computeRecall1NN(labels, 1);
+      r.recall_5 = computeRecall1NN(labels, 5);
+      r.recall_k = computeRecall1NN(labels, k);
 
       r.mbs_on_disk = measureIndexSerializedSize(&index);
       log_step(tag, std::string("serialized size=") +
@@ -1211,9 +1203,8 @@ public:
           },
           mt_result);
       if (mt_ok) {
-        applyMultiThreadMetrics(r.method, r,
-                                (labels.empty() ? nullptr : &labels), mt_result,
-                                /*adopt_as_primary_if_no_baseline=*/true);
+        applyMultiThreadMetrics(r.method, r, &labels, mt_result,
+                                /*adopt_as_primary_if_no_baseline=*/false);
       }
     } catch (const std::exception &e) {
       std::cerr << "    错误: " << e.what() << std::endl;
@@ -1266,25 +1257,22 @@ public:
 
       std::vector<float> distances;
       std::vector<faiss::idx_t> labels;
-      bool skip_baseline = (mt_threads > 1);
-      if (!skip_baseline) {
-        distances.resize((size_t)nq * k);
-        labels.resize((size_t)nq * k);
-        log_step(tag, std::string("search start nq=") + std::to_string(nq) +
-                          ", k=" + std::to_string(k));
-        t0 = std::chrono::high_resolution_clock::now();
-        index.search(nq, queries.data(), k, distances.data(), labels.data(),
-                     &sp);
-        t1 = std::chrono::high_resolution_clock::now();
-        r.search_time_ms =
-            std::chrono::duration<double, std::milli>(t1 - t0).count() / nq;
-        log_step(tag, std::string("search done, time=") +
-                          std::to_string(r.search_time_ms) + " ms/query");
+      // Always run baseline
+      distances.resize((size_t)nq * k);
+      labels.resize((size_t)nq * k);
+      log_step(tag, std::string("search start nq=") + std::to_string(nq) +
+                        ", k=" + std::to_string(k));
+      t0 = std::chrono::high_resolution_clock::now();
+      index.search(nq, queries.data(), k, distances.data(), labels.data(), &sp);
+      t1 = std::chrono::high_resolution_clock::now();
+      r.search_time_ms =
+          std::chrono::duration<double, std::milli>(t1 - t0).count() / nq;
+      log_step(tag, std::string("search done, time=") +
+                        std::to_string(r.search_time_ms) + " ms/query");
 
-        r.recall_1 = computeRecall1NN(labels, 1);
-        r.recall_5 = computeRecall1NN(labels, 5);
-        r.recall_k = computeRecall1NN(labels, k);
-      }
+      r.recall_1 = computeRecall1NN(labels, 1);
+      r.recall_5 = computeRecall1NN(labels, 5);
+      r.recall_k = computeRecall1NN(labels, k);
 
       r.mbs_on_disk = measureIndexSerializedSize(&index);
       log_step(tag, std::string("serialized size=") +
@@ -1311,9 +1299,8 @@ public:
           },
           mt_result);
       if (mt_ok) {
-        applyMultiThreadMetrics(r.method, r,
-                                (labels.empty() ? nullptr : &labels), mt_result,
-                                /*adopt_as_primary_if_no_baseline=*/true);
+        applyMultiThreadMetrics(r.method, r, &labels, mt_result,
+                                /*adopt_as_primary_if_no_baseline=*/false);
       }
     } catch (const std::exception &e) {
       std::cerr << "    错误: " << e.what() << std::endl;
@@ -1359,24 +1346,22 @@ public:
       index.nprobe = nprobe;
       std::vector<float> distances;
       std::vector<faiss::idx_t> labels;
-      bool skip_baseline = (mt_threads > 1);
-      if (!skip_baseline) {
-        distances.resize((size_t)nq * k);
-        labels.resize((size_t)nq * k);
-        log_step(tag, std::string("search start nq=") + std::to_string(nq) +
-                          ", k=" + std::to_string(k));
-        t0 = std::chrono::high_resolution_clock::now();
-        index.search(nq, queries.data(), k, distances.data(), labels.data());
-        t1 = std::chrono::high_resolution_clock::now();
-        r.search_time_ms =
-            std::chrono::duration<double, std::milli>(t1 - t0).count() / nq;
-        log_step(tag, std::string("search done, time=") +
-                          std::to_string(r.search_time_ms) + " ms/query");
+      // Always run baseline
+      distances.resize((size_t)nq * k);
+      labels.resize((size_t)nq * k);
+      log_step(tag, std::string("search start nq=") + std::to_string(nq) +
+                        ", k=" + std::to_string(k));
+      t0 = std::chrono::high_resolution_clock::now();
+      index.search(nq, queries.data(), k, distances.data(), labels.data());
+      t1 = std::chrono::high_resolution_clock::now();
+      r.search_time_ms =
+          std::chrono::duration<double, std::milli>(t1 - t0).count() / nq;
+      log_step(tag, std::string("search done, time=") +
+                        std::to_string(r.search_time_ms) + " ms/query");
 
-        r.recall_1 = computeRecall1NN(labels, 1);
-        r.recall_5 = computeRecall1NN(labels, 5);
-        r.recall_k = computeRecall1NN(labels, k);
-      }
+      r.recall_1 = computeRecall1NN(labels, 1);
+      r.recall_5 = computeRecall1NN(labels, 5);
+      r.recall_k = computeRecall1NN(labels, k);
 
       r.mbs_on_disk = measureIndexSerializedSize(&index);
       log_step(tag, std::string("serialized size=") +
@@ -1395,9 +1380,8 @@ public:
           },
           mt_result);
       if (mt_ok) {
-        applyMultiThreadMetrics(r.method, r,
-                                (labels.empty() ? nullptr : &labels), mt_result,
-                                /*adopt_as_primary_if_no_baseline=*/true);
+        applyMultiThreadMetrics(r.method, r, &labels, mt_result,
+                                /*adopt_as_primary_if_no_baseline=*/false);
       }
     } catch (const std::exception &e) {
       std::cerr << "    错误: " << e.what() << std::endl;
@@ -1459,24 +1443,22 @@ public:
       index.nprobe = nprobe;
       std::vector<float> distances;
       std::vector<faiss::idx_t> labels;
-      bool skip_baseline = (mt_threads > 1);
-      if (!skip_baseline) {
-        distances.resize((size_t)nq * k);
-        labels.resize((size_t)nq * k);
-        log_step(tag, std::string("search start nq=") + std::to_string(nq) +
-                          ", k=" + std::to_string(k));
-        t0 = std::chrono::high_resolution_clock::now();
-        index.search(nq, queries.data(), k, distances.data(), labels.data());
-        t1 = std::chrono::high_resolution_clock::now();
-        r.search_time_ms =
-            std::chrono::duration<double, std::milli>(t1 - t0).count() / nq;
-        log_step(tag, std::string("search done, time=") +
-                          std::to_string(r.search_time_ms) + " ms/query");
+      // Always run baseline
+      distances.resize((size_t)nq * k);
+      labels.resize((size_t)nq * k);
+      log_step(tag, std::string("search start nq=") + std::to_string(nq) +
+                        ", k=" + std::to_string(k));
+      t0 = std::chrono::high_resolution_clock::now();
+      index.search(nq, queries.data(), k, distances.data(), labels.data());
+      t1 = std::chrono::high_resolution_clock::now();
+      r.search_time_ms =
+          std::chrono::duration<double, std::milli>(t1 - t0).count() / nq;
+      log_step(tag, std::string("search done, time=") +
+                        std::to_string(r.search_time_ms) + " ms/query");
 
-        r.recall_1 = computeRecall1NN(labels, 1);
-        r.recall_5 = computeRecall1NN(labels, 5);
-        r.recall_k = computeRecall1NN(labels, k);
-      }
+      r.recall_1 = computeRecall1NN(labels, 1);
+      r.recall_5 = computeRecall1NN(labels, 5);
+      r.recall_k = computeRecall1NN(labels, k);
 
       r.mbs_on_disk = measureIndexSerializedSize(&index);
       log_step(tag, std::string("serialized size=") +
@@ -1499,9 +1481,8 @@ public:
           },
           mt_result);
       if (mt_ok) {
-        applyMultiThreadMetrics(r.method, r,
-                                (labels.empty() ? nullptr : &labels), mt_result,
-                                /*adopt_as_primary_if_no_baseline=*/true);
+        applyMultiThreadMetrics(r.method, r, &labels, mt_result,
+                                /*adopt_as_primary_if_no_baseline=*/false);
       }
     } catch (const std::exception &e) {
       std::cerr << "    错误: " << e.what() << std::endl;
@@ -1549,24 +1530,22 @@ public:
       index.nprobe = nprobe;
       std::vector<float> distances;
       std::vector<faiss::idx_t> labels;
-      bool skip_baseline = (mt_threads > 1);
-      if (!skip_baseline) {
-        distances.resize((size_t)nq * k);
-        labels.resize((size_t)nq * k);
-        log_step(tag, std::string("search start nq=") + std::to_string(nq) +
-                          ", k=" + std::to_string(k));
-        t0 = std::chrono::high_resolution_clock::now();
-        index.search(nq, queries.data(), k, distances.data(), labels.data());
-        t1 = std::chrono::high_resolution_clock::now();
-        r.search_time_ms =
-            std::chrono::duration<double, std::milli>(t1 - t0).count() / nq;
-        log_step(tag, std::string("search done, time=") +
-                          std::to_string(r.search_time_ms) + " ms/query");
+      // Always run baseline
+      distances.resize((size_t)nq * k);
+      labels.resize((size_t)nq * k);
+      log_step(tag, std::string("search start nq=") + std::to_string(nq) +
+                        ", k=" + std::to_string(k));
+      t0 = std::chrono::high_resolution_clock::now();
+      index.search(nq, queries.data(), k, distances.data(), labels.data());
+      t1 = std::chrono::high_resolution_clock::now();
+      r.search_time_ms =
+          std::chrono::duration<double, std::milli>(t1 - t0).count() / nq;
+      log_step(tag, std::string("search done, time=") +
+                        std::to_string(r.search_time_ms) + " ms/query");
 
-        r.recall_1 = computeRecall1NN(labels, 1);
-        r.recall_5 = computeRecall1NN(labels, 5);
-        r.recall_k = computeRecall1NN(labels, k);
-      }
+      r.recall_1 = computeRecall1NN(labels, 1);
+      r.recall_5 = computeRecall1NN(labels, 5);
+      r.recall_k = computeRecall1NN(labels, k);
 
       r.mbs_on_disk = measureIndexSerializedSize(&index);
       log_step(tag, std::string("serialized size=") +
@@ -1589,9 +1568,8 @@ public:
           },
           mt_result);
       if (mt_ok) {
-        applyMultiThreadMetrics(r.method, r,
-                                (labels.empty() ? nullptr : &labels), mt_result,
-                                /*adopt_as_primary_if_no_baseline=*/true);
+        applyMultiThreadMetrics(r.method, r, &labels, mt_result,
+                                /*adopt_as_primary_if_no_baseline=*/false);
       }
     } catch (const std::exception &e) {
       std::cerr << "    错误: " << e.what() << std::endl;
@@ -1655,9 +1633,9 @@ public:
                 << " s, 总构建= " << r.build_time
                 << " s, 训练样本=" << train_size << std::endl;
 
-      std::vector<float> distances;
-      std::vector<faiss::idx_t> labels;
-      faiss::IVFRaBitQSearchParameters sp;
+  std::vector<float> distances;
+  std::vector<faiss::idx_t> labels;
+  faiss::IVFRaBitQSearchParameters sp;
       sp.qb = (uint8_t)qb;
       sp.centered = centered;
       // Important: when passing SearchParameters, nprobe from params is used.
@@ -1714,9 +1692,8 @@ public:
           },
           mt_result);
       if (mt_ok) {
-        applyMultiThreadMetrics(r.method, r,
-                                (labels.empty() ? nullptr : &labels), mt_result,
-                                /*adopt_as_primary_if_no_baseline=*/true);
+        applyMultiThreadMetrics(r.method, r, &labels, mt_result,
+                                /*adopt_as_primary_if_no_baseline=*/false);
       }
     } catch (const std::exception &e) {
       std::cerr << "    错误: " << e.what() << std::endl;
@@ -1827,26 +1804,24 @@ public:
       faiss::IndexRefineSearchParameters ref_sp;
       ref_sp.k_factor = refine_k;
       ref_sp.base_index_params = &ivf_sp;
-      bool skip_baseline = (mt_threads > 1);
-      if (!skip_baseline) {
-        distances.resize((size_t)nq * k);
-        labels.resize((size_t)nq * k);
-        log_step(tag, std::string("search start nq=") + std::to_string(nq) +
-                          ", k=" + std::to_string(k) +
-                          ", refine_k=" + std::to_string(refine_k));
-        t0 = std::chrono::high_resolution_clock::now();
-        wrapper->search(nq, queries.data(), k, distances.data(), labels.data(),
-                        &ref_sp);
-        t1 = std::chrono::high_resolution_clock::now();
-        r.search_time_ms =
-            std::chrono::duration<double, std::milli>(t1 - t0).count() / nq;
-        log_step(tag, std::string("search done, time=") +
-                          std::to_string(r.search_time_ms) + " ms/query");
+      // Always run baseline
+      distances.resize((size_t)nq * k);
+      labels.resize((size_t)nq * k);
+      log_step(tag, std::string("search start nq=") + std::to_string(nq) +
+                        ", k=" + std::to_string(k) +
+                        ", refine_k=" + std::to_string(refine_k));
+      t0 = std::chrono::high_resolution_clock::now();
+      wrapper->search(nq, queries.data(), k, distances.data(), labels.data(),
+                      &ref_sp);
+      t1 = std::chrono::high_resolution_clock::now();
+      r.search_time_ms =
+          std::chrono::duration<double, std::milli>(t1 - t0).count() / nq;
+      log_step(tag, std::string("search done, time=") +
+                        std::to_string(r.search_time_ms) + " ms/query");
 
-        r.recall_1 = computeRecall(labels, ground_truth, 1);
-        r.recall_5 = computeRecall(labels, ground_truth, 5);
-        r.recall_k = computeRecall(labels, ground_truth, k);
-      }
+      r.recall_1 = computeRecall(labels, ground_truth, 1);
+      r.recall_5 = computeRecall(labels, ground_truth, 5);
+      r.recall_k = computeRecall(labels, ground_truth, k);
 
       r.mbs_on_disk = measureIndexSerializedSize(wrapper.get());
       log_step(tag, std::string("serialized size=") +
@@ -1877,9 +1852,8 @@ public:
           },
           mt_result);
       if (mt_ok) {
-        applyMultiThreadMetrics(r.method, r,
-                                (labels.empty() ? nullptr : &labels), mt_result,
-                                /*adopt_as_primary_if_no_baseline=*/true);
+        applyMultiThreadMetrics(r.method, r, &labels, mt_result,
+                                /*adopt_as_primary_if_no_baseline=*/false);
       }
     } catch (const std::exception &e) {
       std::cerr << "    错误: " << e.what() << std::endl;
@@ -1924,25 +1898,22 @@ public:
       faiss::RaBitQSearchParameters sp;
       sp.qb = (uint8_t)qb;
       sp.centered = centered;
-      bool skip_baseline = (mt_threads > 1);
-      if (!skip_baseline) {
-        distances.resize((size_t)nq * k);
-        labels.resize((size_t)nq * k);
-        log_step(tag, std::string("search start nq=") + std::to_string(nq) +
-                          ", k=" + std::to_string(k));
-        t0 = std::chrono::high_resolution_clock::now();
-        index.search(nq, queries.data(), k, distances.data(), labels.data(),
-                     &sp);
-        t1 = std::chrono::high_resolution_clock::now();
-        r.search_time_ms =
-            std::chrono::duration<double, std::milli>(t1 - t0).count() / nq;
-        log_step(tag, std::string("search done, time=") +
-                          std::to_string(r.search_time_ms) + " ms/query");
+      // Always run baseline
+      distances.resize((size_t)nq * k);
+      labels.resize((size_t)nq * k);
+      log_step(tag, std::string("search start nq=") + std::to_string(nq) +
+                        ", k=" + std::to_string(k));
+      t0 = std::chrono::high_resolution_clock::now();
+      index.search(nq, queries.data(), k, distances.data(), labels.data(), &sp);
+      t1 = std::chrono::high_resolution_clock::now();
+      r.search_time_ms =
+          std::chrono::duration<double, std::milli>(t1 - t0).count() / nq;
+      log_step(tag, std::string("search done, time=") +
+                        std::to_string(r.search_time_ms) + " ms/query");
 
-        r.recall_1 = computeRecall(labels, ground_truth, 1);
-        r.recall_5 = computeRecall(labels, ground_truth, 5);
-        r.recall_k = computeRecall(labels, ground_truth, k);
-      }
+      r.recall_1 = computeRecall(labels, ground_truth, 1);
+      r.recall_5 = computeRecall(labels, ground_truth, 5);
+      r.recall_k = computeRecall(labels, ground_truth, k);
 
       r.mbs_on_disk = measureIndexSerializedSize(&index);
       log_step(tag, std::string("serialized size=") +
@@ -1971,9 +1942,8 @@ public:
           },
           mt_result);
       if (mt_ok) {
-        applyMultiThreadMetrics(r.method, r,
-                                (labels.empty() ? nullptr : &labels), mt_result,
-                                /*adopt_as_primary_if_no_baseline=*/true);
+        applyMultiThreadMetrics(r.method, r, &labels, mt_result,
+                                /*adopt_as_primary_if_no_baseline=*/false);
       }
     } catch (const std::exception &e) {
       std::cerr << "    错误: " << e.what() << std::endl;
@@ -2027,39 +1997,34 @@ public:
       r.train_time = 0.0; // no train step in VecML
       r.build_time = r.add_time;
 
-      // Multi-thread behavior: if threads > 1, skip the baseline single-thread
-      // search
       int threads = mt_threads_option;
-      std::vector<faiss::idx_t> labels; // baseline labels (when threads<=1)
-      if (threads <= 1) {
-        // Baseline single-thread search
-        log_step("VecML", std::string("search start nq=") + std::to_string(nq) +
-                              ", k=" + std::to_string(k));
-        std::vector<long> out_ids((size_t)nq * k, -1);
-        auto t_s0 = std::chrono::high_resolution_clock::now();
-        int sret =
-            vecml_search(ctx, queries.data(), nq, dim, k, out_ids.data());
-        auto t_s1 = std::chrono::high_resolution_clock::now();
-        if (sret != 0) {
-          std::cerr << "VecML: search failed: " << sret << std::endl;
-          vecml_destroy(ctx);
-          r.build_time = -1;
-          return r;
-        }
-        double search_sec = std::chrono::duration<double>(t_s1 - t_s0).count();
-        r.search_time_ms = nq > 0 ? (search_sec / (double)nq) * 1000.0 : 0.0;
-        log_step("VecML", std::string("search done, time=") +
-                              std::to_string(r.search_time_ms) + " ms/query");
-
-        labels.assign((size_t)nq * k, -1);
-        for (int i = 0; i < nq * k; ++i) {
-          labels[i] =
-              out_ids[i] >= 0 ? static_cast<faiss::idx_t>(out_ids[i]) : -1;
-        }
-        r.recall_1 = computeRecall(labels, ground_truth, 1);
-        r.recall_5 = computeRecall(labels, ground_truth, 5);
-        r.recall_k = computeRecall(labels, ground_truth, k);
+      std::vector<faiss::idx_t> labels; // baseline labels
+      // Always run baseline single-thread search to populate serial metrics
+      log_step("VecML", std::string("search start nq=") + std::to_string(nq) +
+                            ", k=" + std::to_string(k));
+      std::vector<long> out_ids((size_t)nq * k, -1);
+      auto t_s0 = std::chrono::high_resolution_clock::now();
+      int sret = vecml_search(ctx, queries.data(), nq, dim, k, out_ids.data());
+      auto t_s1 = std::chrono::high_resolution_clock::now();
+      if (sret != 0) {
+        std::cerr << "VecML: search failed: " << sret << std::endl;
+        vecml_destroy(ctx);
+        r.build_time = -1;
+        return r;
       }
+      double search_sec = std::chrono::duration<double>(t_s1 - t_s0).count();
+      r.search_time_ms = nq > 0 ? (search_sec / (double)nq) * 1000.0 : 0.0;
+      log_step("VecML", std::string("search done, time=") +
+                            std::to_string(r.search_time_ms) + " ms/query");
+
+      labels.assign((size_t)nq * k, -1);
+      for (int i = 0; i < nq * k; ++i) {
+        labels[i] =
+            out_ids[i] >= 0 ? static_cast<faiss::idx_t>(out_ids[i]) : -1;
+      }
+      r.recall_1 = computeRecall(labels, ground_truth, 1);
+      r.recall_5 = computeRecall(labels, ground_truth, 5);
+      r.recall_k = computeRecall(labels, ground_truth, k);
 
       // Only run multi-thread smoke test if the user explicitly provided
       // --mt-threads (mt_threads_option > 0). Do not auto-detect.
@@ -2134,20 +2099,11 @@ public:
           r.mt_recall_k = mt_recall_k;
           r.mt_recall_1 = mt_recall_1;
           r.mt_recall_5 = mt_recall_5;
-
-          // 若没有单线程基线（threads>1分支），直接采用多线程结果作为主结果
-          if (labels.empty()) {
-            r.search_time_ms = r.mt_search_time_ms;
-            r.recall_k = r.mt_recall_k;
-            r.recall_1 = r.mt_recall_1;
-            r.recall_5 = r.mt_recall_5;
-          } else {
-            // 仍打印一次多线程结果供参考
-            std::cout << std::fixed << std::setprecision(3)
-                      << "Multi-thread: " << mt_ms_per_query
-                      << " ms/query, recall@" << k << "=" << mt_recall_k
-                      << std::endl;
-          }
+          // Print MT summary line for reference (serial metrics remain in r.*)
+          std::cout << std::fixed << std::setprecision(3)
+                    << "Multi-thread: " << mt_ms_per_query
+                    << " ms/query, recall@" << k << "=" << mt_recall_k
+                    << std::endl;
         }
       }
 
@@ -2237,39 +2193,35 @@ public:
       r.train_time = 0.0;
       r.build_time = r.add_time;
 
-      // Decide whether to run single-thread baseline or adopt MT-only path
+      // Always run single-thread baseline first
       int threads = mt_threads_option;
-      std::vector<faiss::idx_t> labels; // baseline labels when threads<=1
-      if (threads <= 1) {
-        std::vector<long> out_ids((size_t)nq * k, -1);
-        log_step("VecML-Fast-Idx", std::string("search start nq=") +
-                                       std::to_string(nq) +
-                                       ", k=" + std::to_string(k));
-        auto t_s0 = std::chrono::high_resolution_clock::now();
-        int sret =
-            vecml_search(ctx, queries.data(), nq, dim, k, out_ids.data());
-        auto t_s1 = std::chrono::high_resolution_clock::now();
-        if (sret != 0) {
-          std::cerr << "VecML-Fast-Idx: search failed: " << sret << std::endl;
-          vecml_destroy(ctx);
-          r.build_time = -1;
-          return r;
-        }
-        double search_sec = std::chrono::duration<double>(t_s1 - t_s0).count();
-        r.search_time_ms = nq > 0 ? (search_sec / (double)nq) * 1000.0 : 0.0;
-        log_step("VecML-Fast-Idx", std::string("search done, time=") +
-                                       std::to_string(r.search_time_ms) +
-                                       " ms/query");
-
-        labels.assign((size_t)nq * k, -1);
-        for (int i = 0; i < nq * k; ++i) {
-          labels[i] =
-              out_ids[i] >= 0 ? static_cast<faiss::idx_t>(out_ids[i]) : -1;
-        }
-        r.recall_1 = computeRecall1NN(labels, 1);
-        r.recall_5 = computeRecall1NN(labels, 5);
-        r.recall_k = computeRecall1NN(labels, k);
+      std::vector<faiss::idx_t> labels; // baseline labels
+      std::vector<long> out_ids((size_t)nq * k, -1);
+      log_step("VecML-Fast-Idx", std::string("search start nq=") +
+                                     std::to_string(nq) +
+                                     ", k=" + std::to_string(k));
+      auto t_s0 = std::chrono::high_resolution_clock::now();
+      int sret = vecml_search(ctx, queries.data(), nq, dim, k, out_ids.data());
+      auto t_s1 = std::chrono::high_resolution_clock::now();
+      if (sret != 0) {
+        std::cerr << "VecML-Fast-Idx: search failed: " << sret << std::endl;
+        vecml_destroy(ctx);
+        r.build_time = -1;
+        return r;
       }
+      double search_sec = std::chrono::duration<double>(t_s1 - t_s0).count();
+      r.search_time_ms = nq > 0 ? (search_sec / (double)nq) * 1000.0 : 0.0;
+      log_step("VecML-Fast-Idx", std::string("search done, time=") +
+                                     std::to_string(r.search_time_ms) +
+                                     " ms/query");
+
+      labels.assign((size_t)nq * k, -1);
+      for (int i = 0; i < nq * k; ++i) {
+        labels[i] = out_ids[i] >= 0 ? static_cast<faiss::idx_t>(out_ids[i]) : -1;
+      }
+      r.recall_1 = computeRecall1NN(labels, 1);
+      r.recall_5 = computeRecall1NN(labels, 5);
+      r.recall_k = computeRecall1NN(labels, k);
 
       // Optional: MT smoke test mirrors testVecML
       if (threads > 1 && nq > 0 && k > 0) {
@@ -2321,14 +2273,6 @@ public:
           r.mt_recall_5 =
               computeRecall(mt_labels, ground_truth, std::min(5, k));
           r.mt_recall_k = computeRecall(mt_labels, ground_truth, k);
-
-          // If no single-thread baseline, adopt MT metrics as primary
-          if (labels.empty()) {
-            r.search_time_ms = r.mt_search_time_ms;
-            r.recall_1 = r.mt_recall_1;
-            r.recall_5 = r.mt_recall_5;
-            r.recall_k = r.mt_recall_k;
-          }
         }
       } else if (threads <= 1) {
         std::cout << "\n[VecML-Fast-Idx-MT] Skip multi-thread test: "
