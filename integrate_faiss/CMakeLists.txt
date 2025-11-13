@@ -74,7 +74,7 @@ endif()
 
 if(VECML_INCLUDE_DIR AND FLUFFY_LIBRARY AND CPR_LIBRARY)
 	message(STATUS "VecML detected: include=${VECML_INCLUDE_DIR}, fluffy=${FLUFFY_LIBRARY}, cpr=${CPR_LIBRARY}")
-	add_library(vecml_shim SHARED vecml_shim/vecml_shim.cpp)
+	add_library(vecml_shim STATIC vecml_shim/vecml_shim.cpp)
 	target_include_directories(vecml_shim PRIVATE ${VECML_INCLUDE_DIR} ${PROJECT_SOURCE_DIR}/integrate_faiss)
 	target_link_libraries(vecml_shim PRIVATE ${FLUFFY_LIBRARY} ${CPR_LIBRARY})
 	if(VECML_USE_OLD_CXX_ABI)

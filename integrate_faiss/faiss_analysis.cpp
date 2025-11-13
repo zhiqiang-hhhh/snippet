@@ -78,6 +78,19 @@ static void log_step(const std::string &tag, const std::string &msg) {
             << "\n";
 }
 
+// Enforce single-query search for any backend by looping queries.
+template <typename SearchOneFn>
+static void single_search_loop(int nq, int dim, int k, const float *queries,
+                               float *distances, faiss::idx_t *labels,
+                               SearchOneFn &&search_one) {
+  for (int i = 0; i < nq; ++i) {
+    const float *q = queries + (size_t)i * dim;
+    float *D = distances ? distances + (size_t)i * k : nullptr;
+    faiss::idx_t *I = labels ? labels + (size_t)i * k : nullptr;
+    search_one(q, D, I);
+  }
+}
+
 // 通过序列化来估算索引内存占用：写到临时文件，取文件大小（MB）
 static double measureIndexSerializedSize(faiss::Index *index) {
   if (!index)
@@ -374,7 +387,11 @@ public:
     std::vector<float> distances(nq * k);
     ground_truth.resize(nq * k);
 
-    index.search(nq, queries.data(), k, distances.data(), ground_truth.data());
+    single_search_loop(
+        nq, dim, k, queries.data(), distances.data(), ground_truth.data(),
+        [&](const float *q, float *D, faiss::idx_t *I) {
+          index.search(1, q, k, D, I);
+        });
   }
 
   void saveTestData() {
@@ -951,7 +968,11 @@ public:
       log_step(tag, std::string("search start nq=") + std::to_string(nq) +
                         ", k=" + std::to_string(k));
       auto t0 = std::chrono::high_resolution_clock::now();
-      index.search(nq, queries.data(), k, distances.data(), labels.data());
+      single_search_loop(
+          nq, dim, k, queries.data(), distances.data(), labels.data(),
+          [&](const float *q, float *D, faiss::idx_t *I) {
+            index.search(1, q, k, D, I);
+          });
       auto t1 = std::chrono::high_resolution_clock::now();
       r.search_time_ms =
           std::chrono::duration<double, std::milli>(t1 - t0).count() / nq;
@@ -980,9 +1001,13 @@ public:
           r.method,
           [&](std::size_t start, std::size_t count, float *dist_out,
               faiss::idx_t *label_out) {
-            index.search(static_cast<faiss::idx_t>(count),
-                         queries.data() + start * static_cast<std::size_t>(dim),
-                         k, dist_out, label_out);
+            single_search_loop(
+                static_cast<int>(count), dim, k,
+                queries.data() + start * static_cast<std::size_t>(dim),
+                dist_out, label_out,
+                [&](const float *q, float *D, faiss::idx_t *I) {
+                  index.search(1, q, k, D, I);
+                });
           },
           mt_result);
       if (mt_ok) {
@@ -1041,7 +1066,11 @@ public:
       log_step(tag, std::string("search start nq=") + std::to_string(nq) +
                         ", k=" + std::to_string(k));
       t0 = std::chrono::high_resolution_clock::now();
-      index.search(nq, queries.data(), k, distances.data(), labels.data());
+      single_search_loop(
+          nq, dim, k, queries.data(), distances.data(), labels.data(),
+          [&](const float *q, float *D, faiss::idx_t *I) {
+            index.search(1, q, k, D, I);
+          });
       t1 = std::chrono::high_resolution_clock::now();
       r.search_time_ms =
           std::chrono::duration<double, std::milli>(t1 - t0).count() / nq;
@@ -1082,9 +1111,13 @@ public:
           r.method,
           [&](std::size_t start, std::size_t count, float *dist_out,
               faiss::idx_t *label_out) {
-            index.search(static_cast<faiss::idx_t>(count),
-                         queries.data() + start * static_cast<std::size_t>(dim),
-                         k, dist_out, label_out);
+            single_search_loop(
+                static_cast<int>(count), dim, k,
+                queries.data() + start * static_cast<std::size_t>(dim),
+                dist_out, label_out,
+                [&](const float *q, float *D, faiss::idx_t *I) {
+                  index.search(1, q, k, D, I);
+                });
           },
           mt_result);
       if (mt_ok) {
@@ -1171,7 +1204,11 @@ public:
       log_step(tag, std::string("search start nq=") + std::to_string(nq) +
                         ", k=" + std::to_string(k));
       t0 = std::chrono::high_resolution_clock::now();
-      index.search(nq, queries.data(), k, distances.data(), labels.data());
+      single_search_loop(
+          nq, dim, k, queries.data(), distances.data(), labels.data(),
+          [&](const float *q, float *D, faiss::idx_t *I) {
+            index.search(1, q, k, D, I);
+          });
       t1 = std::chrono::high_resolution_clock::now();
       r.search_time_ms =
           std::chrono::duration<double, std::milli>(t1 - t0).count() / nq;
@@ -1197,9 +1234,13 @@ public:
           r.method,
           [&](std::size_t start, std::size_t count, float *dist_out,
               faiss::idx_t *label_out) {
-            index.search(static_cast<faiss::idx_t>(count),
-                         queries.data() + start * static_cast<std::size_t>(dim),
-                         k, dist_out, label_out);
+            single_search_loop(
+                static_cast<int>(count), dim, k,
+                queries.data() + start * static_cast<std::size_t>(dim),
+                dist_out, label_out,
+                [&](const float *q, float *D, faiss::idx_t *I) {
+                  index.search(1, q, k, D, I);
+                });
           },
           mt_result);
       if (mt_ok) {
@@ -1263,7 +1304,11 @@ public:
       log_step(tag, std::string("search start nq=") + std::to_string(nq) +
                         ", k=" + std::to_string(k));
       t0 = std::chrono::high_resolution_clock::now();
-      index.search(nq, queries.data(), k, distances.data(), labels.data(), &sp);
+      single_search_loop(
+          nq, dim, k, queries.data(), distances.data(), labels.data(),
+          [&](const float *q, float *D, faiss::idx_t *I) {
+            index.search(1, q, k, D, I, &sp);
+          });
       t1 = std::chrono::high_resolution_clock::now();
       r.search_time_ms =
           std::chrono::duration<double, std::milli>(t1 - t0).count() / nq;
@@ -1293,9 +1338,13 @@ public:
           r.method,
           [&](std::size_t start, std::size_t count, float *dist_out,
               faiss::idx_t *label_out) {
-            index.search(static_cast<faiss::idx_t>(count),
-                         queries.data() + start * static_cast<std::size_t>(dim),
-                         k, dist_out, label_out);
+            single_search_loop(
+                static_cast<int>(count), dim, k,
+                queries.data() + start * static_cast<std::size_t>(dim),
+                dist_out, label_out,
+                [&](const float *q, float *D, faiss::idx_t *I) {
+                  index.search(1, q, k, D, I);
+                });
           },
           mt_result);
       if (mt_ok) {
@@ -1352,7 +1401,11 @@ public:
       log_step(tag, std::string("search start nq=") + std::to_string(nq) +
                         ", k=" + std::to_string(k));
       t0 = std::chrono::high_resolution_clock::now();
-      index.search(nq, queries.data(), k, distances.data(), labels.data());
+      single_search_loop(
+          nq, dim, k, queries.data(), distances.data(), labels.data(),
+          [&](const float *q, float *D, faiss::idx_t *I) {
+            index.search(1, q, k, D, I);
+          });
       t1 = std::chrono::high_resolution_clock::now();
       r.search_time_ms =
           std::chrono::duration<double, std::milli>(t1 - t0).count() / nq;
@@ -1374,9 +1427,13 @@ public:
           r.method,
           [&](std::size_t start, std::size_t count, float *dist_out,
               faiss::idx_t *label_out) {
-            index.search(static_cast<faiss::idx_t>(count),
-                         queries.data() + start * static_cast<std::size_t>(dim),
-                         k, dist_out, label_out);
+            single_search_loop(
+                static_cast<int>(count), dim, k,
+                queries.data() + start * static_cast<std::size_t>(dim),
+                dist_out, label_out,
+                [&](const float *q, float *D, faiss::idx_t *I) {
+                  index.search(1, q, k, D, I);
+                });
           },
           mt_result);
       if (mt_ok) {
@@ -1449,7 +1506,11 @@ public:
       log_step(tag, std::string("search start nq=") + std::to_string(nq) +
                         ", k=" + std::to_string(k));
       t0 = std::chrono::high_resolution_clock::now();
-      index.search(nq, queries.data(), k, distances.data(), labels.data());
+      single_search_loop(
+          nq, dim, k, queries.data(), distances.data(), labels.data(),
+          [&](const float *q, float *D, faiss::idx_t *I) {
+            index.search(1, q, k, D, I);
+          });
       t1 = std::chrono::high_resolution_clock::now();
       r.search_time_ms =
           std::chrono::duration<double, std::milli>(t1 - t0).count() / nq;
@@ -1475,9 +1536,13 @@ public:
           r.method,
           [&](std::size_t start, std::size_t count, float *dist_out,
               faiss::idx_t *label_out) {
-            index.search(static_cast<faiss::idx_t>(count),
-                         queries.data() + start * static_cast<std::size_t>(dim),
-                         k, dist_out, label_out);
+            single_search_loop(
+                static_cast<int>(count), dim, k,
+                queries.data() + start * static_cast<std::size_t>(dim),
+                dist_out, label_out,
+                [&](const float *q, float *D, faiss::idx_t *I) {
+                  index.search(1, q, k, D, I);
+                });
           },
           mt_result);
       if (mt_ok) {
@@ -1536,7 +1601,11 @@ public:
       log_step(tag, std::string("search start nq=") + std::to_string(nq) +
                         ", k=" + std::to_string(k));
       t0 = std::chrono::high_resolution_clock::now();
-      index.search(nq, queries.data(), k, distances.data(), labels.data());
+      single_search_loop(
+          nq, dim, k, queries.data(), distances.data(), labels.data(),
+          [&](const float *q, float *D, faiss::idx_t *I) {
+            index.search(1, q, k, D, I);
+          });
       t1 = std::chrono::high_resolution_clock::now();
       r.search_time_ms =
           std::chrono::duration<double, std::milli>(t1 - t0).count() / nq;
@@ -1562,9 +1631,13 @@ public:
           r.method,
           [&](std::size_t start, std::size_t count, float *dist_out,
               faiss::idx_t *label_out) {
-            index.search(static_cast<faiss::idx_t>(count),
-                         queries.data() + start * static_cast<std::size_t>(dim),
-                         k, dist_out, label_out);
+            single_search_loop(
+                static_cast<int>(count), dim, k,
+                queries.data() + start * static_cast<std::size_t>(dim),
+                dist_out, label_out,
+                [&](const float *q, float *D, faiss::idx_t *I) {
+                  index.search(1, q, k, D, I);
+                });
           },
           mt_result);
       if (mt_ok) {
@@ -1649,8 +1722,11 @@ public:
                           ", k=" + std::to_string(k) +
                           ", nprobe=" + std::to_string(sp.nprobe));
         t0 = std::chrono::high_resolution_clock::now();
-        idx_rr->search(nq, queries.data(), k, distances.data(), labels.data(),
-                       &sp);
+        single_search_loop(
+            nq, dim, k, queries.data(), distances.data(), labels.data(),
+            [&](const float *q, float *D, faiss::idx_t *I) {
+              idx_rr->search(1, q, k, D, I, &sp);
+            });
         t1 = std::chrono::high_resolution_clock::now();
         r.search_time_ms =
             std::chrono::duration<double, std::milli>(t1 - t0).count() / nq;
@@ -1680,15 +1756,18 @@ public:
       faiss::IndexPreTransform *index_ptr = idx_rr.get();
       faiss::IVFRaBitQSearchParameters sp_proto = sp;
       MultiThreadResult mt_result;
-      bool mt_ok = runMultiThreadSearch(
+        bool mt_ok = runMultiThreadSearch(
           r.method,
           [&, index_ptr, sp_proto](std::size_t start, std::size_t count,
-                                   float *dist_out, faiss::idx_t *label_out) {
-            faiss::IVFRaBitQSearchParameters params = sp_proto;
-            index_ptr->search(static_cast<faiss::idx_t>(count),
-                              queries.data() +
-                                  start * static_cast<std::size_t>(dim),
-                              k, dist_out, label_out, &params);
+                       float *dist_out, faiss::idx_t *label_out) {
+          faiss::IVFRaBitQSearchParameters params = sp_proto;
+          single_search_loop(
+            static_cast<int>(count), dim, k,
+            queries.data() + start * static_cast<std::size_t>(dim),
+            dist_out, label_out,
+            [&](const float *q, float *D, faiss::idx_t *I) {
+              index_ptr->search(1, q, k, D, I, &params);
+            });
           },
           mt_result);
       if (mt_ok) {
@@ -1811,8 +1890,11 @@ public:
                         ", k=" + std::to_string(k) +
                         ", refine_k=" + std::to_string(refine_k));
       t0 = std::chrono::high_resolution_clock::now();
-      wrapper->search(nq, queries.data(), k, distances.data(), labels.data(),
-                      &ref_sp);
+      single_search_loop(
+          nq, dim, k, queries.data(), distances.data(), labels.data(),
+          [&](const float *q, float *D, faiss::idx_t *I) {
+            wrapper->search(1, q, k, D, I, &ref_sp);
+          });
       t1 = std::chrono::high_resolution_clock::now();
       r.search_time_ms =
           std::chrono::duration<double, std::milli>(t1 - t0).count() / nq;
@@ -1837,18 +1919,21 @@ public:
       faiss::IVFRaBitQSearchParameters ivf_sp_proto = ivf_sp;
       faiss::IndexRefineSearchParameters ref_sp_proto = ref_sp;
       MultiThreadResult mt_result;
-      bool mt_ok = runMultiThreadSearch(
+        bool mt_ok = runMultiThreadSearch(
           r.method,
           [&, wrapper_ptr, ivf_sp_proto,
            ref_sp_proto](std::size_t start, std::size_t count, float *dist_out,
-                         faiss::idx_t *label_out) {
-            faiss::IVFRaBitQSearchParameters ivf_params = ivf_sp_proto;
-            faiss::IndexRefineSearchParameters refine_params = ref_sp_proto;
-            refine_params.base_index_params = &ivf_params;
-            wrapper_ptr->search(static_cast<faiss::idx_t>(count),
-                                queries.data() +
-                                    start * static_cast<std::size_t>(dim),
-                                k, dist_out, label_out, &refine_params);
+                 faiss::idx_t *label_out) {
+          faiss::IVFRaBitQSearchParameters ivf_params = ivf_sp_proto;
+          faiss::IndexRefineSearchParameters refine_params = ref_sp_proto;
+          refine_params.base_index_params = &ivf_params;
+          single_search_loop(
+            static_cast<int>(count), dim, k,
+            queries.data() + start * static_cast<std::size_t>(dim),
+            dist_out, label_out,
+            [&](const float *q, float *D, faiss::idx_t *I) {
+              wrapper_ptr->search(1, q, k, D, I, &refine_params);
+            });
           },
           mt_result);
       if (mt_ok) {
@@ -1904,7 +1989,11 @@ public:
       log_step(tag, std::string("search start nq=") + std::to_string(nq) +
                         ", k=" + std::to_string(k));
       t0 = std::chrono::high_resolution_clock::now();
-      index.search(nq, queries.data(), k, distances.data(), labels.data(), &sp);
+      single_search_loop(
+          nq, dim, k, queries.data(), distances.data(), labels.data(),
+          [&](const float *q, float *D, faiss::idx_t *I) {
+            index.search(1, q, k, D, I, &sp);
+          });
       t1 = std::chrono::high_resolution_clock::now();
       r.search_time_ms =
           std::chrono::duration<double, std::milli>(t1 - t0).count() / nq;
@@ -1936,9 +2025,13 @@ public:
           [&, sp_proto](std::size_t start, std::size_t count, float *dist_out,
                         faiss::idx_t *label_out) {
             faiss::RaBitQSearchParameters params = sp_proto;
-            index.search(static_cast<faiss::idx_t>(count),
-                         queries.data() + start * static_cast<std::size_t>(dim),
-                         k, dist_out, label_out, &params);
+            single_search_loop(
+                static_cast<int>(count), dim, k,
+                queries.data() + start * static_cast<std::size_t>(dim),
+                dist_out, label_out,
+                [&](const float *q, float *D, faiss::idx_t *I) {
+                  index.search(1, q, k, D, I, &params);
+                });
           },
           mt_result);
       if (mt_ok) {
