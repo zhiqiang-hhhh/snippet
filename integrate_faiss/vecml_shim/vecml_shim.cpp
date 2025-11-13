@@ -75,7 +75,8 @@ static void vlog(const std::string &msg) {
 
 extern "C" {
 
-vecml_ctx_t vecml_create(const char *base_path, const char *license_path, bool fast_index) {
+vecml_ctx_t vecml_create(const char *base_path, const char *license_path,
+                         bool fast_index) {
   try {
     // Always clean the base path on each construction to keep behavior simple
     try {
@@ -83,19 +84,22 @@ vecml_ctx_t vecml_create(const char *base_path, const char *license_path, bool f
         std::error_code fec;
         std::filesystem::remove_all(base_path, fec);
         if (fec)
-          vlog(std::string("create: remove ") + base_path + " failed: " + fec.message());
+          vlog(std::string("create: remove ") + base_path +
+               " failed: " + fec.message());
         else
           vlog(std::string("create: removed base path ") + base_path);
       } else {
         vlog("create: base_path is null or empty");
       }
     } catch (const std::exception &e) {
-      vlog(std::string("create: exception while removing base path: ") + e.what());
+      vlog(std::string("create: exception while removing base path: ") +
+           e.what());
     }
 
     VecMLHandle *h = new VecMLHandle();
     h->base_path = base_path ? std::string(base_path) : std::string();
-    vlog(std::string("create: init FluffyInterface, base=") + (base_path ? base_path : "") +
+    vlog(std::string("create: init FluffyInterface, base=") +
+         (base_path ? base_path : "") +
          ", license=" + (license_path ? license_path : ""));
     h->api = std::make_shared<fluffy::FluffyInterface>(
         std::string(base_path), std::string(license_path));
@@ -111,7 +115,8 @@ vecml_ctx_t vecml_create(const char *base_path, const char *license_path, bool f
     h->index_name = "test_index";
     // Configure fast-index preference for this handle; effective at add_data
     h->use_fast_index = fast_index;
-    vlog(std::string("create: success, use_fast_index=") + (fast_index ? "true" : "false"));
+    vlog(std::string("create: success, use_fast_index=") +
+         (fast_index ? "true" : "false"));
     return reinterpret_cast<vecml_ctx_t>(h);
   } catch (const std::exception &e) {
     vlog(std::string("create: exception: ") + e.what());
@@ -125,7 +130,8 @@ int vecml_add_data(vecml_ctx_t ctx, const float *data, int n, int dim,
     return -1;
   VecMLHandle *h = reinterpret_cast<VecMLHandle *>(ctx);
   try {
-    vlog(std::string("add: start n=") + std::to_string(n) + ", dim=" + std::to_string(dim) +
+    vlog(std::string("add: start n=") + std::to_string(n) +
+         ", dim=" + std::to_string(dim) +
          ", threads=" + std::to_string(h->fast_index_threads) +
          (h->use_fast_index ? ", mode=fast-index" : ", mode=standard"));
     // Ensure an index exists with the correct dimension and distance type.
@@ -135,24 +141,27 @@ int vecml_add_data(vecml_ctx_t ctx, const float *data, int n, int dim,
     if (h->api->get_vector_dim() == 0) {
       // cast to int to match the SDK overload - dim_t is an SDK typedef
       fluffy::ErrorCode attach_ec = fluffy::ErrorCode::Success;
-  if (h->use_fast_index) {
+      if (h->use_fast_index) {
         // Use fast index (soil index)
         h->index_name = "fast_index";
         attach_ec = h->api->attach_soil_index(
             (int)dim, "dense", fluffy::DistanceFunctionType::Euclidean,
-    h->fast_shrink_rate, h->index_name, h->fast_max_samples,
-    (h->fast_index_threads > 0 ? h->fast_index_threads : 1));
+            h->fast_shrink_rate, h->index_name, h->fast_max_samples,
+            (h->fast_index_threads > 0 ? h->fast_index_threads : 1));
       } else {
         attach_ec = h->api->attach_index(
             (int)dim, "dense", fluffy::DistanceFunctionType::Euclidean,
-    h->index_name, (h->fast_index_threads > 0 ? h->fast_index_threads : 1));
+            h->index_name,
+            (h->fast_index_threads > 0 ? h->fast_index_threads : 1));
       }
       if (attach_ec != fluffy::ErrorCode::Success) {
-        vlog(std::string("add: attach index failed ec=") + std::to_string((int)attach_ec));
+        vlog(std::string("add: attach index failed ec=") +
+             std::to_string((int)attach_ec));
         // continue: add_data_batch may create index implicitly, but we tried
         // to make behavior explicit for correct metric/dim.
       } else {
-        vlog(std::string("add: attached index '") + h->index_name + "' with dim=" + std::to_string(dim));
+        vlog(std::string("add: attached index '") + h->index_name +
+             "' with dim=" + std::to_string(dim));
       }
     }
     // Prepare batch of (string_id, unique_ptr<Vector>) as the SDK expects
@@ -165,7 +174,8 @@ int vecml_add_data(vecml_ctx_t ctx, const float *data, int n, int dim,
       std::unique_ptr<fluffy::Vector> vec;
       fluffy::ErrorCode ec = h->api->build_vector_dense(embedding, vec);
       if (ec != fluffy::ErrorCode::Success || !vec) {
-        vlog(std::string("add: build_vector_dense failed at ") + std::to_string(i));
+        vlog(std::string("add: build_vector_dense failed at ") +
+             std::to_string(i));
         return -2;
       }
       long id = ids ? ids[i] : i;
@@ -176,20 +186,24 @@ int vecml_add_data(vecml_ctx_t ctx, const float *data, int n, int dim,
       batch.emplace_back(sid, std::move(vec));
     }
 
-  std::vector<fluffy::ErrorCode> ecs =
-    h->api->add_data_batch(batch, /*threads=*/(h->fast_index_threads > 0 ? h->fast_index_threads : 1));
-    vlog(std::string("add: add_data_batch done, items=") + std::to_string((int)batch.size()));
+    std::vector<fluffy::ErrorCode> ecs = h->api->add_data_batch(
+        batch,
+        /*threads=*/(h->fast_index_threads > 0 ? h->fast_index_threads : 1));
+    vlog(std::string("add: add_data_batch done, items=") +
+         std::to_string((int)batch.size()));
     // check results
     for (const auto &ec : ecs) {
       if (ec != fluffy::ErrorCode::Success) {
-        vlog(std::string("add: add_data_batch returned error ec=") + std::to_string((int)ec));
+        vlog(std::string("add: add_data_batch returned error ec=") +
+             std::to_string((int)ec));
         // continue but report failure
       }
     }
     // Flush to ensure data is persisted/visible for subsequent searches
     fluffy::ErrorCode flush_ec = h->api->flush();
     if (flush_ec != fluffy::ErrorCode::Success) {
-      vlog(std::string("add: flush failed ec=") + std::to_string((int)flush_ec));
+      vlog(std::string("add: flush failed ec=") +
+           std::to_string((int)flush_ec));
     } else {
       vlog("add: flush successful");
     }
@@ -208,8 +222,9 @@ int vecml_search(vecml_ctx_t ctx, const float *queries, int nq, int dim, int k,
     return -1;
   VecMLHandle *h = reinterpret_cast<VecMLHandle *>(ctx);
   try {
-    vlog(std::string("search: start nq=") + std::to_string(nq) + ", dim=" + std::to_string(dim) +
-         ", k=" + std::to_string(k) + ", index='" + h->index_name + "'");
+    vlog(std::string("search: start nq=") + std::to_string(nq) +
+         ", dim=" + std::to_string(dim) + ", k=" + std::to_string(k) +
+         ", index='" + h->index_name + "'");
     // Build query vectors and Query objects
     std::vector<fluffy::Query> queries_vec;
     std::vector<std::unique_ptr<fluffy::Vector>>
@@ -223,7 +238,8 @@ int vecml_search(vecml_ctx_t ctx, const float *queries, int nq, int dim, int k,
       std::unique_ptr<fluffy::Vector> vec;
       fluffy::ErrorCode ec = h->api->build_vector_dense(embedding, vec);
       if (ec != fluffy::ErrorCode::Success || !vec) {
-        vlog(std::string("search: build_vector_dense failed for query ") + std::to_string(i));
+        vlog(std::string("search: build_vector_dense failed for query ") +
+             std::to_string(i));
         return -2;
       }
       fluffy::Query q;
@@ -247,8 +263,8 @@ int vecml_search(vecml_ctx_t ctx, const float *queries, int nq, int dim, int k,
       fluffy::ErrorCode sec =
           h->api->search(queries_vec[qi], qr, idx, 0.3f, 1.0f);
       if (sec != fluffy::ErrorCode::Success) {
-        vlog(std::string("search: search() failed for query ") + std::to_string(qi) +
-             ", ec=" + std::to_string((int)sec));
+        vlog(std::string("search: search() failed for query ") +
+             std::to_string(qi) + ", ec=" + std::to_string((int)sec));
         // mark no results for this query
         for (int t = 0; t < k; ++t)
           out_ids[(size_t)qi * k + t] = -1;
