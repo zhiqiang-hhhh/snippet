@@ -170,11 +170,9 @@ int vecml_add_data(vecml_ctx_t ctx, const float *data, int n, int dim,
       }
       long id = ids ? ids[i] : i;
       std::string sid = std::string("id_") + std::to_string(id);
-      // set attribute id and keep the attribute string alive until
-      // set_attribute copies it
-      std::string id_str = std::to_string(id);
-      vec->set_attribute("id", reinterpret_cast<const uint8_t *>(id_str.data()),
-                         id_str.size());
+      // Avoid setting extra attributes that may require external lifetime
+      // management. The string_id already encodes the numeric id and is used
+      // to reconstruct ids during search results mapping.
       batch.emplace_back(sid, std::move(vec));
     }
 
