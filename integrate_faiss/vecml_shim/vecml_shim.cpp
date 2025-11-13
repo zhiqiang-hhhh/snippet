@@ -30,7 +30,7 @@ struct VecMLHandle {
   bool use_fast_index = false;
   float fast_shrink_rate = 0.4f;
   int fast_max_samples = 100000;
-  int fast_index_threads = 16;
+  int index_threads = 16;
 };
 
 // 轻量日志工具（默认开启，可通过 VECML_LOG=0 关闭）
@@ -132,7 +132,7 @@ int vecml_add_data(vecml_ctx_t ctx, const float *data, int n, int dim,
   try {
     vlog(std::string("add: start n=") + std::to_string(n) +
          ", dim=" + std::to_string(dim) +
-         ", threads=" + std::to_string(h->fast_index_threads) +
+         ", threads=" + std::to_string(h->index_threads) +
          (h->use_fast_index ? ", mode=fast-index" : ", mode=standard"));
     // Ensure an index exists with the correct dimension and distance type.
     // If no index was attached earlier (or vector dim is unknown), attach
@@ -147,12 +147,12 @@ int vecml_add_data(vecml_ctx_t ctx, const float *data, int n, int dim,
         attach_ec = h->api->attach_soil_index(
             (int)dim, "dense", fluffy::DistanceFunctionType::Euclidean,
             h->fast_shrink_rate, h->index_name, h->fast_max_samples,
-            (h->fast_index_threads > 0 ? h->fast_index_threads : 1));
+            (h->index_threads > 0 ? h->index_threads : 1));
       } else {
         attach_ec = h->api->attach_index(
             (int)dim, "dense", fluffy::DistanceFunctionType::Euclidean,
             h->index_name,
-            (h->fast_index_threads > 0 ? h->fast_index_threads : 1));
+            (h->index_threads > 0 ? h->index_threads : 1));
       }
       if (attach_ec != fluffy::ErrorCode::Success) {
         vlog(std::string("add: attach index failed ec=") +
@@ -185,10 +185,10 @@ int vecml_add_data(vecml_ctx_t ctx, const float *data, int n, int dim,
       // to reconstruct ids during search results mapping.
       batch.emplace_back(sid, std::move(vec));
     }
-
+    vlog("add: build vectors batch done, calling add_data_batch...");
     std::vector<fluffy::ErrorCode> ecs = h->api->add_data_batch(
         batch,
-        /*threads=*/(h->fast_index_threads > 0 ? h->fast_index_threads : 1));
+        /*threads=*/(h->index_threads > 0 ? h->index_threads : 1));
     vlog(std::string("add: add_data_batch done, items=") +
          std::to_string((int)batch.size()));
     // check results
@@ -316,7 +316,7 @@ void vecml_set_threads(vecml_ctx_t ctx, int threads) {
   VecMLHandle *h = reinterpret_cast<VecMLHandle *>(ctx);
   if (threads <= 0)
     threads = 1;
-  h->fast_index_threads = threads;
+  h->index_threads = threads;
   vlog(std::string("set_threads: ") + std::to_string(threads));
 }
 
@@ -370,7 +370,7 @@ int vecml_enable_fast_index(vecml_ctx_t ctx, float shrink_rate,
   h->use_fast_index = true;
   h->fast_shrink_rate = shrink_rate;
   h->fast_max_samples = max_num_samples;
-  h->fast_index_threads = num_threads;
+  h->index_threads = num_threads;
   vlog(std::string("enable_fast_index: shrink=") + std::to_string(shrink_rate) +
        ", max_samples=" + std::to_string(max_num_samples) +
        ", threads=" + std::to_string(num_threads));
