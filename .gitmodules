@@ -10,6 +10,3 @@
 [submodule "openssl"]
 	path = contrib/openssl
 	url = https://github.com/openssl/openssl.git
-[submodule "ck-openssl"]
-	path = contrib/ck-openssl
-	url = https://github.com/ClickHouse/openssl.git
