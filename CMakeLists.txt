@@ -12,7 +12,11 @@ if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Release)
 endif()
 
+option(WITH_VECML "Enable building VecML components" OFF)
+
 add_subdirectory(integrate_faiss)
 add_subdirectory(csapp)
 add_subdirectory(openmp)
-add_subdirectory(vecml)
+if(WITH_VECML)
+    add_subdirectory(vecml)
+endif()
