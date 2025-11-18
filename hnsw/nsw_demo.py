@@ -73,8 +73,11 @@ class NSW:
                     visited.add(nb)
                     dist = self._distance(vec, self.vectors[nb])
                     # 当堆未达 efC 时放宽接纳；否则仅接纳比当前弹出更近的点
-                    if dist < d or len(candidates) < self.efC:
+                    if len(candidates) < self.efC:
                         heapq.heappush(candidates, (dist, nb))
+                    else:
+                        if dist < d:
+                            heapq.heappush(candidates, (dist, nb))
 
         # 2) 在候选区域内选出 M 个最近邻，建立双向连边
         neighbors = sorted([(self._distance(vec, self.vectors[x]), x) for x in visited])[: self.M]
