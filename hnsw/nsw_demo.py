@@ -12,7 +12,7 @@ import random
 import argparse
 import time
 import logging
-from typing import List
+from typing import List, Tuple
 
 
 def setup_logger(level=logging.INFO):
@@ -43,6 +43,47 @@ class NSW:
     def _distance(self, a: np.ndarray, b: np.ndarray) -> float:
         return float(np.linalg.norm(a - b))
 
+    def _link_bidirectional(self, a: int, b: int):
+        """Ensure the adjacency lists contain a <-> b."""
+        if b not in self.graph[a]:
+            self.graph[a].append(b)
+        if a not in self.graph[b]:
+            self.graph[b].append(a)
+
+    def _prune_node(self, node: int):
+        """Keep only the M nearest neighbours for `node` and drop symmetric links.
+
+        This mirrors the HNSW shrink step:
+        1. Sort the adjacency list by distance to the base vector.
+        2. Retain the closest M neighbours.
+        3. Remove the base node from any neighbours that were evicted so the
+           graph stays undirected and degree-bounded.
+        """
+        if self.M <= 0:
+            return
+
+        # 去重以免重复邻居干扰排序
+        unique_neighbors = list(dict.fromkeys(self.graph[node]))
+        if len(unique_neighbors) <= self.M:
+            self.graph[node] = unique_neighbors
+            return
+
+        base_vec = self.vectors[node]
+        scored = [(self._distance(base_vec, self.vectors[nbr]), nbr) for nbr in unique_neighbors]
+        scored.sort(key=lambda x: x[0])
+
+        keep_pairs = scored[: self.M]
+        keep_set = {nbr for _, nbr in keep_pairs}
+        removed = [nbr for _, nbr in scored[self.M :]]
+
+        self.graph[node] = [nbr for _, nbr in keep_pairs]
+
+        for nbr in removed:
+            adj = self.graph[nbr]
+            if node in adj:
+                adj.remove(node)
+
+
     # -----------------
     # 构建（插入）
     # -----------------
@@ -62,12 +103,13 @@ class NSW:
         # 1) 从入口出发进行受限探索，收集候选区域
         start = self.enter_point
         # 候选堆（小根堆）：(距离, 节点)
-        candidates: List[tuple[float, int]] = [(self._distance(vec, self.vectors[start]), start)]
+        candidates: List[Tuple[float, int]] = [(self._distance(vec, self.vectors[start]), start)]
+        self.logger.debug(f"[add={idx}] start from enter_point={start}, initial dist={candidates[0][0]:.4f}")
         visited = {start}
         # 这里用 results 仅用于驱动弹出，visited 汇聚了最终的候选区域
         while candidates:
             d, node = heapq.heappop(candidates)
-            # self.logger.debug(f"[add] neighbor of {node} is {self.graph[node]}")
+            self.logger.debug(f"[add={idx}] pop node={node} with dist={d:.4f} from candidates, neighbors {self.graph[node]}")
             for nb in self.graph[node]:
                 if nb not in visited:
                     visited.add(nb)
@@ -75,17 +117,32 @@ class NSW:
                     # 当堆未达 efC 时放宽接纳；否则仅接纳比当前弹出更近的点
                     if len(candidates) < self.efC:
                         heapq.heappush(candidates, (dist, nb))
+                        self.logger.debug(f"[add={idx}] consider neighbor {nb} with dist={dist:.4f} added to candidates (size now {len(candidates)})")
                     else:
                         if dist < d:
+                            self.logger.debug(f"[add={idx}] consider neighbor {nb} with dist={dist:.4f} < popped dist={d:.4f}")
                             heapq.heappush(candidates, (dist, nb))
 
         # 2) 在候选区域内选出 M 个最近邻，建立双向连边
-        neighbors = sorted([(self._distance(vec, self.vectors[x]), x) for x in visited])[: self.M]
-        self.graph[idx] = [x for _, x in neighbors]
-        for _, x in neighbors:
-            self.graph[x].append(idx)
+        neighbors = sorted((self._distance(vec, self.vectors[x]), x) for x in visited)[: self.M]
+        neighbor_ids = [x for _, x in neighbors]
+
+        # 找到了距离自己最近的 M 个点
+        # 由于这 M 个点是在之前添加的，他们的邻居表中可能已经有 M 个邻居了
+        # 新增加的点可能更近，因此需要修剪这些老节点的邻居表
+        for nb in neighbor_ids:
+            self._link_bidirectional(idx, nb)
+            self._prune_node(nb)
+
+        self._prune_node(idx)
+
+        # # 随机更新入口点：在入图节点之间随机采样一个作为新的入口
+        # if self.graph and len(self.graph) > 0:
+        #     self.enter_point = random.randint(0, len(self.graph) - 1)
+        #     self.logger.debug(f"[add={idx}] update enter_point -> {self.enter_point}")
+
         if self.verbose:
-            self.logger.debug(f"[add] idx={idx} connect {len(neighbors)} neighbors -> {self.graph[idx]}")
+            self.logger.debug(f"[add={idx}] connect {len(self.graph[idx])} neighbors -> {self.graph[idx]}")
 
         # 3) 可选：更新入口为更“中心”的一个点（简单策略：保持不变或偶尔采样更新）
         # 这里保持不变，演示即可
@@ -103,9 +160,9 @@ class NSW:
         start = self.enter_point
         self.logger.info(f"[search] start from {start}, k={k}")
 
-        candidates: List[tuple[float, int]] = [(self._distance(query, self.vectors[start]), start)]
+        candidates: List[Tuple[float, int]] = [(self._distance(query, self.vectors[start]), start)]
         visited = {start}
-        results: List[tuple[float, int]] = []
+        results: List[Tuple[float, int]] = []
 
         while candidates:
             d, node = heapq.heappop(candidates)
@@ -152,6 +209,7 @@ def plot_graph(graph: List[List[int]],
 
     pos = {}
     used_layout = False
+    direct_xy_layout = False
 
     # 1) PCA 布局：基于原始向量降到 2D，尽量保相对距离
     if layout == "pca" and vectors is not None:
@@ -163,16 +221,23 @@ def plot_graph(graph: List[List[int]],
             if X.shape[0] != n:
                 logger.warning(f"plot_graph: vectors length {X.shape[0]} != graph size {n}, fallback to grid")
             else:
-                # 中心化后做 SVD，取前两主成分
-                Xc = X - X.mean(axis=0, keepdims=True)
-                # 当特征维度或样本数较小时，SVD 也能稳定工作
-                U, S, Vt = np.linalg.svd(Xc, full_matrices=False)
-                # 投影到前两主成分
-                PC = (Xc @ Vt[:2].T) if Vt.shape[0] >= 2 else np.hstack([Xc @ Vt[:1].T, np.zeros((n, 1))])
-                # 不做等比例缩放，让坐标自适应填充矩形画布
-                for i in range(n):
-                    pos[i] = (float(PC[i, 0]), float(PC[i, 1]) if PC.shape[1] > 1 else 0.0)
-                used_layout = True
+                if X.shape[1] == 2:
+                    # 对于二维向量，直接按原始坐标绘制
+                    for i in range(n):
+                        pos[i] = (float(X[i, 0]), float(X[i, 1]))
+                    used_layout = True
+                    direct_xy_layout = True
+                else:
+                    # 中心化后做 SVD，取前两主成分
+                    Xc = X - X.mean(axis=0, keepdims=True)
+                    # 当特征维度或样本数较小时，SVD 也能稳定工作
+                    U, S, Vt = np.linalg.svd(Xc, full_matrices=False)
+                    # 投影到前两主成分
+                    PC = (Xc @ Vt[:2].T) if Vt.shape[0] >= 2 else np.hstack([Xc @ Vt[:1].T, np.zeros((n, 1))])
+                    # 不做等比例缩放，让坐标自适应填充矩形画布
+                    for i in range(n):
+                        pos[i] = (float(PC[i, 0]), float(PC[i, 1]) if PC.shape[1] > 1 else 0.0)
+                    used_layout = True
         except Exception as e:
             logger.debug(f"PCA layout failed ({e}), will try other layouts")
 
@@ -212,7 +277,12 @@ def plot_graph(graph: List[List[int]],
     # 使用矩形画布；不强制等比，便于填满画布并体现相对距离
     fig, ax = plt.subplots(figsize=(10, 6), dpi=dpi)
     ax.set_aspect('auto')
-    ax.axis('off')
+    if direct_xy_layout:
+        ax.set_xlabel("X")
+        ax.set_ylabel("Y")
+        ax.grid(True, linestyle='--', linewidth=0.5, alpha=0.4)
+    else:
+        ax.axis('off')
 
     # 先画边
     for (u, v) in edges:
@@ -227,7 +297,30 @@ def plot_graph(graph: List[List[int]],
 
     # 标注 id
     for i in range(n):
-        ax.text(pos[i][0], pos[i][1], str(i), color='white', ha='center', va='center', fontsize=8, zorder=3)
+        if direct_xy_layout:
+            ax.text(
+                pos[i][0],
+                pos[i][1],
+                f"{i}\n({pos[i][0]:.2f}, {pos[i][1]:.2f})",
+                color='black',
+                ha='center',
+                va='center',
+                fontsize=9,
+                zorder=3,
+                bbox=dict(boxstyle="round,pad=0.2", facecolor="white", edgecolor="none", alpha=0.7),
+            )
+        else:
+            ax.text(pos[i][0], pos[i][1], str(i), color='white', ha='center', va='center', fontsize=8, zorder=3)
+
+    if direct_xy_layout:
+        # 扩大边界，让坐标标注更易读
+        pad = 0.1
+        xmin, xmax = min(xs), max(xs)
+        ymin, ymax = min(ys), max(ys)
+        dx = xmax - xmin if xmax > xmin else 1.0
+        dy = ymax - ymin if ymax > ymin else 1.0
+        ax.set_xlim(xmin - dx * pad, xmax + dx * pad)
+        ax.set_ylim(ymin - dy * pad, ymax + dy * pad)
 
     if out_file:
         fig.savefig(out_file, bbox_inches='tight')
