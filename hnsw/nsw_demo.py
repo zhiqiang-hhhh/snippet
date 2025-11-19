@@ -186,7 +186,8 @@ def plot_graph(graph: List[List[int]],
                layout: str = "pca",
                dpi: int = 150,
                logger: logging.Logger | None = None,
-               vectors: List[np.ndarray] | np.ndarray | None = None):
+               vectors: List[np.ndarray] | np.ndarray | None = None,
+               entry_point: int | None = None):
     """
     可视化 NSW 图：每个节点显示其 id，边用线连接。
     - 支持矩形布局，且尽量反映相对距离：pca（默认，基于向量的前两主成分）。
@@ -274,47 +275,112 @@ def plot_graph(graph: List[List[int]],
         logger.error(f"matplotlib 未安装，无法绘图: {e}")
         return
 
-    # 使用矩形画布；不强制等比，便于填满画布并体现相对距离
     fig, ax = plt.subplots(figsize=(10, 6), dpi=dpi)
+    fig.patch.set_facecolor('#0b0e1a')
     ax.set_aspect('auto')
+    ax.set_facecolor('#0b0e1a')
+
     if direct_xy_layout:
-        ax.set_xlabel("X")
-        ax.set_ylabel("Y")
-        ax.grid(True, linestyle='--', linewidth=0.5, alpha=0.4)
+        ax.set_xlabel("X", color='#9fb0cf')
+        ax.set_ylabel("Y", color='#9fb0cf')
+        ax.grid(True, linestyle='--', linewidth=0.4, alpha=0.25, color='#33445a')
+        ax.tick_params(colors='#9fb0cf', labelsize=8)
+        for spine in ax.spines.values():
+            spine.set_color('#2b364a')
     else:
         ax.axis('off')
 
-    # 先画边
-    for (u, v) in edges:
-        x1, y1 = pos[u]
-        x2, y2 = pos[v]
-        ax.plot([x1, x2], [y1, y2], color='#888', linewidth=0.8, zorder=1)
-
-    # 再画点
     xs = [pos[i][0] for i in range(n)]
     ys = [pos[i][1] for i in range(n)]
-    ax.scatter(xs, ys, s=100, c='#1f77b4', zorder=2)
 
-    # 标注 id
-    for i in range(n):
-        if direct_xy_layout:
-            ax.text(
-                pos[i][0],
-                pos[i][1],
-                f"{i}\n({pos[i][0]:.2f}, {pos[i][1]:.2f})",
-                color='black',
-                ha='center',
-                va='center',
-                fontsize=9,
-                zorder=3,
-                bbox=dict(boxstyle="round,pad=0.2", facecolor="white", edgecolor="none", alpha=0.7),
-            )
-        else:
-            ax.text(pos[i][0], pos[i][1], str(i), color='white', ha='center', va='center', fontsize=8, zorder=3)
+    edges_list = list(edges)
+    segments = [((pos[u][0], pos[u][1]), (pos[v][0], pos[v][1])) for (u, v) in edges_list]
+    if segments:
+        try:
+            from matplotlib.collections import LineCollection
 
-    if direct_xy_layout:
-        # 扩大边界，让坐标标注更易读
-        pad = 0.1
+            lc = LineCollection(segments, linewidths=1.8, colors='#44d6ff', alpha=0.4, zorder=1)
+            ax.add_collection(lc)
+        except Exception:
+            for (x1, y1), (x2, y2) in segments:
+                ax.plot([x1, x2], [y1, y2], color='#44d6ff', linewidth=1.3, alpha=0.4, zorder=1)
+
+    deg = np.array([len(graph[i]) for i in range(n)], dtype=float) if n > 0 else np.array([])
+    node_colors: np.ndarray | list[str] = ['#4ad5ff'] * n
+    node_sizes: np.ndarray | float = 110.0
+    cmap = None
+    norm = None
+    colorbar_data = None
+    if deg.size > 0:
+        try:
+            import matplotlib.cm as cm
+            import matplotlib.colors as mcolors
+
+            cmap = cm.get_cmap('plasma')
+            if np.isclose(deg.max(), deg.min()):
+                norm = mcolors.Normalize(vmin=0.0, vmax=1.0)
+                node_colors = cmap(np.full(deg.shape, 0.6))
+                node_sizes = np.full(deg.shape, 130.0)
+            else:
+                norm = mcolors.Normalize(vmin=float(deg.min()), vmax=float(deg.max()))
+                node_colors = cmap(norm(deg))
+                node_sizes = 120.0 + 28.0 * (deg - deg.min())
+                colorbar_data = (cmap, norm)
+        except Exception:
+            node_colors = ['#4ad5ff'] * n
+            node_sizes = 120.0
+
+    scatter = ax.scatter(
+        xs,
+        ys,
+        s=node_sizes,
+        c=node_colors,
+        edgecolors='#f4f4f4',
+        linewidths=0.6,
+        zorder=3,
+    )
+
+    if colorbar_data is not None:
+        cmap, norm = colorbar_data
+        try:
+            from matplotlib.cm import ScalarMappable
+        except Exception:
+            import matplotlib.cm as cm
+
+            ScalarMappable = cm.ScalarMappable  # type: ignore
+
+        sm = ScalarMappable(norm=norm, cmap=cmap)
+        sm.set_array([])
+        cbar = fig.colorbar(sm, ax=ax, fraction=0.04, pad=0.035)
+        cbar.ax.set_ylabel('degree', color='#9fb0cf', fontsize=8)
+        cbar.ax.tick_params(colors='#9fb0cf', labelsize=8)
+        cbar.outline.set_edgecolor('#2b364a')
+
+    if entry_point is not None and 0 <= entry_point < n:
+        ep_x, ep_y = pos[entry_point]
+        ax.scatter(
+            [ep_x],
+            [ep_y],
+            s=240,
+            marker='*',
+            c='#ffd166',
+            edgecolors='#fefefe',
+            linewidths=1.1,
+            zorder=5,
+        )
+        ax.annotate(
+            "entry",
+            (ep_x, ep_y),
+            textcoords='offset points',
+            xytext=(6, 10),
+            fontsize=8,
+            color='#ffd166',
+            fontweight='bold',
+            zorder=6,
+        )
+
+    if direct_xy_layout and xs and ys:
+        pad = 0.12
         xmin, xmax = min(xs), max(xs)
         ymin, ymax = min(ys), max(ys)
         dx = xmax - xmin if xmax > xmin else 1.0
@@ -323,7 +389,7 @@ def plot_graph(graph: List[List[int]],
         ax.set_ylim(ymin - dy * pad, ymax + dy * pad)
 
     if out_file:
-        fig.savefig(out_file, bbox_inches='tight')
+        fig.savefig(out_file, bbox_inches='tight', facecolor=fig.get_facecolor())
         logger.info(f"graph saved to {out_file}")
     if show:
         plt.show()
@@ -378,7 +444,15 @@ def main():
     # 如需绘图
     if args.plot_graph:
         out_path = args.plot_file if args.plot_file else None
-    plot_graph(nsw.graph, out_file=out_path, show=args.show_plot, layout=args.layout, logger=logger, vectors=nsw.vectors)
+    plot_graph(
+        nsw.graph,
+        out_file=out_path,
+        show=args.show_plot,
+        layout=args.layout,
+        logger=logger,
+        vectors=nsw.vectors,
+        entry_point=nsw.enter_point,
+    )
 
     t2 = time.perf_counter()
     all_res = []
