@@ -1,5 +1,8 @@
 ## 饿汉式
 `Eager Initialization`
+
+为什么叫饿汉式：生怕对象在使用的时候不存在，所以选择在一开始就把对象创建好。
+
 ```cpp
 class Singleton {
     private:
@@ -18,6 +21,9 @@ Singleton Singleton::instance;
 
 ## 懒汉式
 `Lazy Initialization`
+
+懒汉式：与饿汉式相反，不到使用的那一刻绝不创建对象。
+
 ```cpp
 class Singleton {
 public:
