@@ -55,7 +55,6 @@ public:
 利用二分法每次检查一半的区间
 ```cpp
 class Solution {
-class Solution {
 public:
   // 抽屉原理方案：仅当值域大小 <= 元素数时，二分计数才能保证找到重复。
   // 否则值域过大，计数不会超载，需要回退到排序比较。
@@ -141,3 +140,72 @@ int main() {
 有点类似组合数学里的抽屉原理。
 
 抽屉原理：有 N 双袜子要放到 n 个抽屉里，N > n，那么一定有抽屉里需要保存超过 1 双袜子。 
+
+## 包含重复元素且位置距离不超过 k
+[LeetCode 219](https://leetcode.com/problems/contains-duplicate-ii/description/)
+
+朴素做法 1：
+```cpp
+class Solution {
+public:
+    bool containsNearbyDuplicate(vector<int>& nums, int k) {
+        size_t len = nums.size();
+        std::unordered_map<int, std::vector<size_t>> tbl;
+
+        for (size_t i = 0; i < len; ++i) {
+            if (tbl.contains(nums[i])) {
+                std::vector<size_t>& v = tbl[nums[i]];
+                v.push_back(i);
+            } else {
+                tbl[nums[i]] = std::vector<size_t>{i};
+            }
+        }
+
+        for (auto& entry : tbl) {
+            if (entry.second.size() < 2) {
+                continue;
+            }
+
+            std::vector<size_t>& candidates = entry.second;
+            std::sort(candidates.begin(), candidates.end());
+            bool first = true;
+            size_t prev = 0;
+
+            for (auto itr = candidates.begin(); itr != candidates.end(); itr++) {
+                if (first) {
+                    first = false;
+                    prev = *itr;
+                    continue;
+                }
+
+                size_t dist = *itr - prev;
+                if (dist <= k) {
+                    return true;
+                } else {
+                    prev = *itr;
+                }
+            }
+        }
+
+        return false;
+    }
+};
+```
+朴素做法 2：
+```cpp
+class Solution {
+public:
+    bool containsNearbyDuplicate(vector<int>& nums, int k) {
+        for (size_t i = 0; i < nums.size(); ++i) {
+            for (size_t j = i + 1; j < nums.size() && j <= i + k; ++j) {
+                if (nums[i] == nums[j]) {
+                    return true;
+                }
+            }
+        }
+
+        return false;
+    }
+};
+```
+做法 2 的时间复杂读是 O(k*N) 的。
