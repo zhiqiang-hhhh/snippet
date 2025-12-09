@@ -1,3 +1,13 @@
+<!-- @import "[TOC]" {cmd="toc" depthFrom=1 depthTo=6 orderedList=false} -->
+<!-- code_chunk_output -->
+
+- [数组中的重复元素](#数组中的重复元素)
+  - [有限值域](#有限值域)
+    - [不允许修改数组](#不允许修改数组)
+  - [包含重复元素且位置距离不超过 k](#包含重复元素且位置距离不超过-k)
+
+<!-- /code_chunk_output -->
+
 ## 数组中的重复元素
 
 ### 有限值域
@@ -141,7 +151,7 @@ int main() {
 
 抽屉原理：有 N 双袜子要放到 n 个抽屉里，N > n，那么一定有抽屉里需要保存超过 1 双袜子。 
 
-## 包含重复元素且位置距离不超过 k
+### 包含重复元素且位置距离不超过 k
 [LeetCode 219](https://leetcode.com/problems/contains-duplicate-ii/description/)
 
 朴素做法 1：
@@ -209,3 +219,31 @@ public:
 };
 ```
 做法 2 的时间复杂读是 O(k*N) 的。
+
+最优做法：滑动窗口。
+```cpp
+class Solution {
+public:
+    bool containsNearbyDuplicate(vector<int>& nums, int k) {
+        std::unordered_set<int> win;
+        size_t len = nums.size();
+
+        for (size_t i = 0; i < len; ++i) {
+            int cur = nums[i];
+            if (win.contains(cur)) {
+                return true;
+            } else {
+                win.insert(cur);
+
+                if (win.size() > k) {
+                    win.erase(nums[i-k]);
+                }
+            }
+        }
+
+        return false;
+
+        return false;
+    }
+};
+```
