@@ -17,33 +17,33 @@ data_rows = [
     [128, 10000, "HNSW-Flat", "M=32", 64, 0.00, 0.24, 0.24, 0.01, 0.786, 7.5, 0.7],
     [128, 10000, "HNSW-SQ8",  "M=32,QT_8bit", 64, 0.00, 1.78, 1.78, 0.06, 0.783, 3.8, 1.3],
     [128, 10000, "HNSW-SQ4",  "M=32,QT_4bit", 64, 0.00, 2.52, 2.52, 0.07, 0.702, 3.2, 1.5],
-    [128, 10000, "HNSW-PQ",   "M=32,PQ(m=64,nbits=8,tr=1.00)", 64, 6.61, 0.57, 7.18, 0.02, 0.728, 3.3, 1.5],
+    # [128, 10000, "HNSW-PQ",   "M=32,PQ(m=64,nbits=8,tr=1.00)", 64, 6.61, 0.57, 7.18, 0.02, 0.728, 3.3, 1.5],
     # 128 维，Rows = 50k
     [128, 50000, "HNSW-Flat", "M=32", 64, 0.00, 7.65, 7.65, 0.02, 0.502, 37.4, 0.7],
     [128, 50000, "HNSW-SQ8",  "M=32,QT_8bit", 64, 0.01, 86.37, 86.38, 0.08, 0.503, 19.1, 1.3],
     [128, 50000, "HNSW-SQ4",  "M=32,QT_4bit", 64, 0.01, 77.11, 77.12, 0.11, 0.457, 16.0, 1.5],
-    [128, 50000, "HNSW-PQ",   "M=32,PQ(m=64,nbits=8,tr=1.00)", 64, 31.44, 20.82, 52.26, 0.02, 0.487, 16.2, 1.5],
+    # [128, 50000, "HNSW-PQ",   "M=32,PQ(m=64,nbits=8,tr=1.00)", 64, 31.44, 20.82, 52.26, 0.02, 0.487, 16.2, 1.5],
     # 128 维，Rows = 100k
     [128, 100000, "HNSW-Flat", "M=32", 64, 0.00, 21.71, 21.71, 0.03, 0.387, 74.8, 0.7],
     [128, 100000, "HNSW-SQ8",  "M=32,QT_8bit", 64, 0.01, 226.64, 226.66, 0.08, 0.376, 38.2, 1.3],
     [128, 100000, "HNSW-SQ4",  "M=32,QT_4bit", 64, 0.01, 207.03, 207.04, 0.11, 0.351, 32.1, 1.5],
-    [128, 100000, "HNSW-PQ",   "M=32,PQ(m=64,nbits=8,tr=1.00)", 64, 39.99, 61.25, 101.23, 0.03, 0.363, 32.2, 1.5],
+    # [128, 100000, "HNSW-PQ",   "M=32,PQ(m=64,nbits=8,tr=1.00)", 64, 39.99, 61.25, 101.23, 0.03, 0.363, 32.2, 1.5],
 
     # 268 维，Rows = 10k
     [268, 10000, "HNSW-Flat", "M=32", 64, 0.00, 0.70, 0.70, 0.02, 0.689, 12.4, 0.8],
     [268, 10000, "HNSW-SQ8",  "M=32,QT_8bit", 64, 0.00, 7.91, 7.91, 0.12, 0.684, 5.0, 1.9],
     [268, 10000, "HNSW-SQ4",  "M=32,QT_4bit", 64, 0.00, 10.76, 10.76, 0.15, 0.625, 3.8, 2.6],
-    [268, 10000, "HNSW-PQ",   "M=32,PQ(m=128,nbits=8,tr=1.00)", 64, 12.85, 2.72, 15.56, 0.03, 0.643, 4.1, 2.4],
+    # [268, 10000, "HNSW-PQ",   "M=32,PQ(m=128,nbits=8,tr=1.00)", 64, 12.85, 2.72, 15.56, 0.03, 0.643, 4.1, 2.4],
     # 268 维，Rows = 50k
     [268, 50000, "HNSW-Flat", "M=32", 64, 0.00, 17.33, 17.33, 0.04, 0.330, 61.8, 0.8],
     [268, 50000, "HNSW-SQ8",  "M=32,QT_8bit", 64, 0.01, 217.44, 217.45, 0.16, 0.336, 25.2, 1.9],
     [268, 50000, "HNSW-SQ4",  "M=32,QT_4bit", 64, 0.01, 204.41, 204.42, 0.20, 0.313, 19.1, 2.6],
-    [268, 50000, "HNSW-PQ",   "M=32,PQ(m=128,nbits=8,tr=1.00)", 64, 62.83, 88.18, 151.01, 0.05, 0.324, 19.3, 2.5],
+    # [268, 50000, "HNSW-PQ",   "M=32,PQ(m=128,nbits=8,tr=1.00)", 64, 62.83, 88.18, 151.01, 0.05, 0.324, 19.3, 2.5],
     # 268 维，Rows = 100k
     [268, 100000, "HNSW-Flat", "M=32", 64, 0.00, 42.72, 42.72, 0.06, 0.215, 123.6, 0.8],
     [268, 100000, "HNSW-SQ8",  "M=32,QT_8bit", 64, 0.03, 501.92, 501.94, 0.16, 0.225, 50.4, 1.9],
     [268, 100000, "HNSW-SQ4",  "M=32,QT_4bit", 64, 0.03, 490.05, 490.08, 0.21, 0.203, 38.2, 2.6],
-    [268, 100000, "HNSW-PQ",   "M=32,PQ(m=128,nbits=8,tr=1.00)", 64, 82.64, 217.02, 299.66, 0.05, 0.229, 38.4, 2.5],
+    # [268, 100000, "HNSW-PQ",   "M=32,PQ(m=128,nbits=8,tr=1.00)", 64, 82.64, 217.02, 299.66, 0.05, 0.229, 38.4, 2.5],
 ]
 
 columns = [
@@ -220,9 +220,9 @@ for dim in dims:
         x_col="Rows",
         y_col="mbs_on_disk",
         group_col="Method",
-        title=f"Index Size on Disk vs Rows (Dim={dim})",
-        ylabel="Index Size on Disk (MB)",
-        out_png=os.path.join(out_dir, f"disk_size_vs_rows{suffix}.png"),
+        title=f"Memory Usage vs Rows (Dim={dim})",
+        ylabel="Memory Usage (MB)",
+        out_png=os.path.join(out_dir, f"memory_usage_vs_rows{suffix}.png"),
         value_fmt="{:.1f}",
         legend_loc="upper left",
         legend_inside=True,
@@ -264,7 +264,8 @@ print("全部柱状图绘制完成（按维度输出）。")
 
 from matplotlib.patches import Patch
 
-METHOD_ORDER = ["HNSW-Flat", "HNSW-SQ8", "HNSW-SQ4", "HNSW-PQ"]
+# METHOD_ORDER = ["HNSW-Flat", "HNSW-SQ8", "HNSW-SQ4", "HNSW-PQ"]
+METHOD_ORDER = ["HNSW-Flat", "HNSW-SQ8", "HNSW-SQ4"]
 BASE_COLORS = list(plt.get_cmap("tab10").colors)
 COLOR_MAP = {m: BASE_COLORS[i % len(BASE_COLORS)] for i, m in enumerate(METHOD_ORDER)}
 
@@ -370,9 +371,9 @@ plot_dim_side_by_side(
     dims_to_show=dims,
     x_col="Rows",
     y_col="mbs_on_disk",
-    ylabel="Index Size on Disk (MB)",
-    title_prefix="Index Size on Disk vs Rows (Dim Comparison)",
-    out_png=os.path.join(out_dir, "disk_size_vs_rows_dims_compare.png"),
+    ylabel="Memory Usage (MB)",
+    title_prefix="Memory Usage vs Rows (Dim Comparison)",
+    out_png=os.path.join(out_dir, "memory_usage_vs_rows_dims_compare.png"),
     value_fmt="{:.1f}",
 )
 
