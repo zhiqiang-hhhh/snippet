@@ -7,3 +7,7 @@
 [submodule "openssl"]
 	path = contrib/openssl
 	url = https://github.com/openssl/openssl.git
+[submodule "contrib/diskann"]
+	path = contrib/diskann
+	url = git@github.com:zhiqiang-hhhh/DiskANN.git
+	branch = cpp_main
