@@ -46,21 +46,13 @@ set(BUILD_TESTING OFF CACHE BOOL "Disable FAISS testing")
 add_subdirectory(${PROJECT_SOURCE_DIR}/contrib/faiss ${PROJECT_BINARY_DIR}/faiss EXCLUDE_FROM_ALL)
 
 find_package(Threads REQUIRED)
+find_package(OpenMP REQUIRED COMPONENTS C CXX)
 
 add_executable(integrate_faiss main.cpp)
-target_link_libraries(integrate_faiss PRIVATE faiss)
-
-add_executable(test_hnswpq test_hnswpq.cpp)
-target_link_libraries(test_hnswpq PRIVATE faiss)
-
-add_executable(test_hnswrabitq test_hnswrabitq.cpp)
-target_link_libraries(test_hnswrabitq PRIVATE faiss)
-
-add_executable(sq sq.cpp)
-target_link_libraries(sq PRIVATE faiss)
+target_link_libraries(integrate_faiss PRIVATE faiss OpenMP::OpenMP_CXX)
 
 add_executable(faiss_analysis src/faiss_analysis.cpp util/cli_utils.cpp util/results_utils.cpp)
-target_link_libraries(faiss_analysis PRIVATE faiss Threads::Threads)
+target_link_libraries(faiss_analysis PRIVATE faiss Threads::Threads OpenMP::OpenMP_CXX)
 
 # VecML (Fluffy) support: optional C shim to avoid C++ ABI conflicts
 option(VECML_LIB_PATH "Path to VecML SDK dir containing fluffy_interface.h and libfluffy_shared_lib.so" "")
