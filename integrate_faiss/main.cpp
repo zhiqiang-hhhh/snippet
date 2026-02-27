@@ -2,8 +2,25 @@
 #include "faiss/MetricType.h"
 #include "faiss/impl/AuxIndexStructures.h"
 #include <faiss/IndexFlat.h>
+#include <faiss/IndexIVFFlat.h>
+#include <faiss/index_io.h>
+#include <faiss/invlists/OnDiskInvertedLists.h>
 #include <iostream>
+#include <string>
 #include <vector>
+#include <sys/stat.h>
+#include <unistd.h>
+
+static std::string make_tmp_path_in_dir(const std::string& dir, const char* prefix) {
+    std::string path = dir + "/" + prefix + "XXXXXX";
+    std::vector<char> buf(path.begin(), path.end());
+    buf.push_back('\0');
+    int fd = mkstemp(buf.data());
+    if (fd != -1) {
+        close(fd);
+    }
+    return std::string(buf.data());
+}
 
 int main() {
     // Test faiss index merge
@@ -84,6 +101,51 @@ int main() {
     for (int i = 0; i < k && labels[i] != -1; i++) {
         std::cout << "Label: " << labels[i] << ", Distance: " << distances[i] << std::endl;
     }
+
+    // Test OnDiskIVF (IndexIVFFlat with OnDiskInvertedLists)
+    std::cout << "\n--- Testing OnDiskIVF ---" << std::endl;
+    std::vector<float> all_vectors = vectors1;
+    all_vectors.insert(all_vectors.end(), vectors2.begin(), vectors2.end());
+
+    int nlist = 2;
+    faiss::IndexFlatL2 quantizer(dim);
+    faiss::IndexIVFFlat ivf_index(&quantizer, dim, nlist, faiss::METRIC_L2);
+
+    // Provide more training data to avoid clustering warnings.
+    int ntrain = 100;
+    std::vector<float> train_vectors(ntrain * dim);
+    for (int i = 0; i < ntrain; ++i) {
+        for (int d = 0; d < dim; ++d) {
+            train_vectors[i * dim + d] = static_cast<float>(i * 0.1 + d);
+        }
+    }
+    ivf_index.train(ntrain, train_vectors.data());
+
+    std::string ondisk_dir = "../ondisk_test";
+    ::mkdir(ondisk_dir.c_str(), 0755);
+    std::string invlists_path = make_tmp_path_in_dir(ondisk_dir, "faiss_invlists_");
+    faiss::OnDiskInvertedLists ondisk(ivf_index.nlist, ivf_index.code_size, invlists_path.c_str());
+    ivf_index.replace_invlists(&ondisk);
+    ivf_index.add(6, all_vectors.data());
+    ivf_index.nprobe = nlist;
+
+    std::cout << "OnDiskIVF size: " << ivf_index.ntotal << std::endl;
+    std::string index_path = make_tmp_path_in_dir(ondisk_dir, "faiss_index_");
+    faiss::write_index(&ivf_index, index_path.c_str());
+
+    faiss::Index* loaded = faiss::read_index(index_path.c_str());
+    if (auto* ivf_loaded = dynamic_cast<faiss::IndexIVF*>(loaded)) {
+        ivf_loaded->nprobe = nlist;
+    }
+    loaded->search(1, query.data(), k, distances.data(), labels.data());
+
+    std::cout << "Search results on OnDiskIVF (after reload):" << std::endl;
+    for (int i = 0; i < k && labels[i] != -1; i++) {
+        std::cout << "Label: " << labels[i] << ", Distance: " << distances[i] << std::endl;
+    }
+
+    // Keep on-disk files for inspection.
+    delete loaded;
     
     return 0;
 }
