@@ -5,3 +5,4 @@ __pycache__
 search/data/*
 search/sift_1m/*
 compile_commands.json
+.DS_Store
