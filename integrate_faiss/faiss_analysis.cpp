@@ -1213,102 +1213,6 @@ public:
     return r;
   }
 
-  // HNSW-RaBitQ
-  TestResult testHNSWRaBitQ(int hnsw_m, int efC, int efS, int qb,
-                            bool centered) {
-    std::cout << "  测试 IndexHNSWRaBitQ (M=" << hnsw_m << ", efC=" << efC
-              << ", efS=" << efS << ", qb=" << qb
-              << (centered ? ", centered" : "") << ")..." << std::endl;
-    TestResult r{};
-    r.method = "HNSW-RaBitQ";
-    std::string tag = r.method;
-    r.hnsw_M = hnsw_m;
-    r.efC = efC;
-    r.efS = efS;
-    r.rabitq_qb = qb;
-    r.rabitq_centered = centered ? 1 : 0;
-    try {
-      log_step(tag, "start");
-      faiss::IndexHNSWRaBitQ index(dim, hnsw_m, faiss::METRIC_L2);
-      index.hnsw.efConstruction = efC;
-
-      log_step(tag, std::string("train start nb=") + std::to_string(nb));
-      auto t0 = std::chrono::high_resolution_clock::now();
-      index.train(nb, database.data());
-      auto t1 = std::chrono::high_resolution_clock::now();
-      r.train_time = std::chrono::duration<double>(t1 - t0).count();
-      log_step(tag, std::string("train done, time=") +
-                        std::to_string(r.train_time) + " s");
-      log_step(tag, std::string("add start nb=") + std::to_string(nb));
-      auto t2 = std::chrono::high_resolution_clock::now();
-      index.add(nb, database.data());
-      auto t3 = std::chrono::high_resolution_clock::now();
-      r.add_time = std::chrono::duration<double>(t3 - t2).count();
-      r.build_time = r.train_time + r.add_time;
-      log_step(tag, std::string("add done, time=") +
-                        std::to_string(r.add_time) + " s");
-
-      index.set_query_quantization(qb, centered);
-
-      faiss::SearchParametersHNSWRaBitQ sp;
-      sp.efSearch = efS;
-      sp.qb = (uint8_t)qb;
-      sp.centered = centered;
-
-      std::vector<float> distances;
-      std::vector<faiss::idx_t> labels;
-      // Always run baseline
-      distances.resize((size_t)nq * k);
-      labels.resize((size_t)nq * k);
-      log_step(tag, std::string("search start nq=") + std::to_string(nq) +
-                        ", k=" + std::to_string(k));
-      t0 = std::chrono::high_resolution_clock::now();
-      index.search(nq, queries.data(), k, distances.data(), labels.data(), &sp);
-      t1 = std::chrono::high_resolution_clock::now();
-      r.search_time_ms =
-          std::chrono::duration<double, std::milli>(t1 - t0).count() / nq;
-      log_step(tag, std::string("search done, time=") +
-                        std::to_string(r.search_time_ms) + " ms/query");
-
-      r.recall_1 = computeRecall1NN(labels, 1);
-      r.recall_5 = computeRecall1NN(labels, 5);
-      r.recall_k = computeRecall1NN(labels, k);
-
-      r.mbs_on_disk = measureIndexSerializedSize(&index);
-      log_step(tag, std::string("serialized size=") +
-                        std::to_string(r.mbs_on_disk) + " MB");
-      if (nb > 0) {
-        double per_vec = (r.mbs_on_disk * 1024.0 * 1024.0) / nb;
-        r.compression_ratio = ((double)dim * 4.0) / per_vec;
-      } else {
-        r.compression_ratio = 0.0;
-      }
-      std::cout << std::fixed << std::setprecision(3)
-                << "    训练(train)= " << r.train_time
-                << " s, 建索引(add)= " << r.add_time
-                << " s, 总构建= " << r.build_time << " s" << std::endl;
-
-      MultiThreadResult mt_result;
-      bool mt_ok = runMultiThreadSearch(
-          r.method,
-          [&](std::size_t start, std::size_t count, float *dist_out,
-              faiss::idx_t *label_out) {
-            index.search(static_cast<faiss::idx_t>(count),
-                         queries.data() + start * static_cast<std::size_t>(dim),
-                         k, dist_out, label_out);
-          },
-          mt_result);
-      if (mt_ok) {
-        applyMultiThreadMetrics(r.method, r, &labels, mt_result,
-                                /*adopt_as_primary_if_no_baseline=*/false);
-      }
-    } catch (const std::exception &e) {
-      std::cerr << "    错误: " << e.what() << std::endl;
-      r.build_time = -1;
-    }
-    return r;
-  }
-
   // IVF-Flat
   TestResult testIVFFlat(int nlist, int nprobe) {
     std::cout << "  测试 IndexIVFFlat (nlist=" << nlist << ", nprobe=" << nprobe
@@ -1637,7 +1541,6 @@ public:
   std::vector<faiss::idx_t> labels;
   faiss::IVFRaBitQSearchParameters sp;
       sp.qb = (uint8_t)qb;
-      sp.centered = centered;
       // Important: when passing SearchParameters, nprobe from params is used.
       // Default is 1, so make sure to pass the desired nprobe here.
       sp.nprobe = nprobe;
@@ -1659,7 +1562,7 @@ public:
       }
 
       std::cout << "    调试: nprobe=" << sp.nprobe << ", qb=" << (int)sp.qb
-                << ", centered=" << sp.centered << std::endl;
+                << std::endl;
 
       if (!labels.empty()) {
         r.recall_1 = computeRecall1NN(labels, 1);
@@ -1798,7 +1701,6 @@ public:
       std::vector<faiss::idx_t> labels;
       faiss::IVFRaBitQSearchParameters ivf_sp;
       ivf_sp.qb = (uint8_t)qb;
-      ivf_sp.centered = centered;
       ivf_sp.nprobe = nprobe;
       // nprobe is already set on index; still pass via base params
       faiss::IndexRefineSearchParameters ref_sp;
@@ -1897,7 +1799,6 @@ public:
       std::vector<faiss::idx_t> labels;
       faiss::RaBitQSearchParameters sp;
       sp.qb = (uint8_t)qb;
-      sp.centered = centered;
       // Always run baseline
       distances.resize((size_t)nq * k);
       labels.resize((size_t)nq * k);
@@ -2436,23 +2337,6 @@ public:
                             r.dataset = bench_local.getDatasetName();
                             results.push_back(r);
                           }
-                        }
-                      }
-                    }
-                  }
-                  if (contains("hnsw_rabitq")) {
-                    for (int qb_v : rabitq_qb_list) {
-                      for (int centered_flag : rabitq_centered_list) {
-                        bool centered = centered_flag != 0;
-                        auto r = bench_local.testHNSWRaBitQ(hM, efC_v, efS_v,
-                                                            qb_v, centered);
-                        if (r.build_time >= 0) {
-                          r.dim = bench_local.getDim();
-                          r.nb = bench_local.getNb();
-                          r.nq = bench_local.getNq();
-                          r.k = bench_local.getK();
-                          r.dataset = bench_local.getDatasetName();
-                          results.push_back(r);
                         }
                       }
                     }
