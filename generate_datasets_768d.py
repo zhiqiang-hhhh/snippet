@@ -31,14 +31,32 @@ import pyarrow as pa
 # Configuration
 SOURCE_FILE = "datasets/source_768d/cohere_1m_train.parquet"
 
-HF_PARTS = [
-    "train-00000-of-00004-1a1932c9ca1c7152.parquet",
-    "train-00001-of-00004-f4a4f5540ade14b4.parquet",
-    "train-00002-of-00004-ff770df3ab420d14.parquet",
-    "train-00003-of-00004-85b3dbbc960e92ec.parquet",
+# Download sources (tried in order):
+#   1. Aliyun OSS (VectorDBBench mirror, China-friendly, single file)
+#   2. AWS S3 / CloudFront (VectorDBBench official, single file)
+#   3. HuggingFace (4 shards, need merge)
+DOWNLOAD_SOURCES = [
+    {
+        "label":  "Aliyun OSS (China)",
+        "url":    "https://assets.zilliz.com.cn/benchmark/cohere_medium_1m/train.parquet",
+        "single": True,
+    },
+    {
+        "label":  "AWS S3 (Global)",
+        "url":    "https://assets.zilliz.com/benchmark/cohere_medium_1m/train.parquet",
+        "single": True,
+    },
+    {
+        "label":  "HuggingFace (4 shards)",
+        "urls": [
+            "https://huggingface.co/datasets/Cohere/wikipedia-22-12-simple-embeddings/resolve/main/data/train-00000-of-00004-1a1932c9ca1c7152.parquet",
+            "https://huggingface.co/datasets/Cohere/wikipedia-22-12-simple-embeddings/resolve/main/data/train-00001-of-00004-f4a4f5540ade14b4.parquet",
+            "https://huggingface.co/datasets/Cohere/wikipedia-22-12-simple-embeddings/resolve/main/data/train-00002-of-00004-ff770df3ab420d14.parquet",
+            "https://huggingface.co/datasets/Cohere/wikipedia-22-12-simple-embeddings/resolve/main/data/train-00003-of-00004-85b3dbbc960e92ec.parquet",
+        ],
+        "single": False,
+    },
 ]
-HF_BASE_URL = "https://huggingface.co/datasets/Cohere/wikipedia-22-12-simple-embeddings/resolve/main/data"
-HF_MIRROR_URL = "https://hf-mirror.com/datasets/Cohere/wikipedia-22-12-simple-embeddings/resolve/main/data"
 OUTPUT_BASE = "datasets"
 NUM_USERS = 100
 SHARD_SIZE = 1_000_000   # rows per shard
@@ -57,7 +75,7 @@ DATASETS = [
 
 # ─── Phase 0: Download source data if missing ────────────────────
 
-def _download_file(url, dest, timeout=30):
+def _download_file(url, dest, timeout=60):
     """Try to download a file, return True on success."""
     ret = os.system(
         f'curl -L --fail --retry 3 --retry-delay 5 '
@@ -67,24 +85,16 @@ def _download_file(url, dest, timeout=30):
 
 
 def ensure_source_data(filepath):
-    """Download and merge parquet shards from HuggingFace if source file is missing.
+    """Download Cohere 768D source parquet if missing.
 
-    Tries hf-mirror.com (China mirror) first, falls back to huggingface.co.
-    Can be overridden via env var HF_ENDPOINT, e.g.:
-        HF_ENDPOINT=https://your-mirror.com/datasets/... python3 generate_datasets_768d.py
+    Tries multiple sources in order:
+      1. Aliyun OSS  (China-friendly, single file, ~3GB)
+      2. AWS S3      (Global CDN, single file, ~3GB)
+      3. HuggingFace (4 shards, merge needed)
     """
     if os.path.exists(filepath):
         print(f"Source file already exists: {filepath}")
         return
-
-    env_endpoint = os.environ.get("HF_ENDPOINT")
-    if env_endpoint:
-        urls = [env_endpoint.rstrip("/")]
-    else:
-        urls = [HF_MIRROR_URL, HF_BASE_URL]
-
-    print(f"Source file not found: {filepath}")
-    print(f"Will try endpoints in order: {urls}")
 
     source_dir = os.path.dirname(filepath)
     os.makedirs(source_dir, exist_ok=True)
@@ -92,42 +102,52 @@ def ensure_source_data(filepath):
     tmp_dir = tempfile.mkdtemp(prefix="cohere_dl_", dir=source_dir)
 
     try:
-        # Download all parts, trying each endpoint
-        for i, filename in enumerate(HF_PARTS):
-            dest = os.path.join(tmp_dir, filename)
-            downloaded = False
-            for base_url in urls:
-                url = f"{base_url}/{filename}"
-                print(f"  [{i+1}/{len(HF_PARTS)}] Trying {url} ...")
-                if _download_file(url, dest):
-                    downloaded = True
-                    break
-                print(f"         Failed, trying next endpoint...")
-            if not downloaded:
-                raise RuntimeError(
-                    f"Failed to download {filename} from all endpoints.\n"
-                    f"  You can set HF_ENDPOINT env var to specify a custom mirror, or\n"
-                    f"  manually place the source file at: {filepath}"
-                )
+        for src in DOWNLOAD_SOURCES:
+            label = src["label"]
+            print(f"\nTrying source: {label} ...")
 
-        # Merge into single parquet (emb column only)
-        print("  Merging parquet files...")
-        tables = []
-        for filename in HF_PARTS:
-            part_path = os.path.join(tmp_dir, filename)
-            t = pq.read_table(part_path, columns=["emb"])
-            tables.append(t)
-        merged = pa.concat_tables(tables)
-        pq.write_table(merged, filepath)
-        print(f"  Done: {merged.num_rows:,} rows -> {filepath}")
+            try:
+                if src["single"]:
+                    # Single file download
+                    tmp_file = os.path.join(tmp_dir, "train.parquet")
+                    if _download_file(src["url"], tmp_file):
+                        os.rename(tmp_file, filepath)
+                        print(f"  Done: {filepath}")
+                        return
+                    print(f"  Failed.")
+                else:
+                    # Multi-shard download + merge
+                    parts = []
+                    ok = True
+                    for i, url in enumerate(src["urls"]):
+                        fname = os.path.basename(url)
+                        dest = os.path.join(tmp_dir, fname)
+                        print(f"  [{i+1}/{len(src['urls'])}] {fname} ...")
+                        if not _download_file(url, dest):
+                            ok = False
+                            break
+                        parts.append(dest)
+                    if ok:
+                        print("  Merging parquet files (emb column only)...")
+                        tables = [pq.read_table(p, columns=["emb"]) for p in parts]
+                        merged = pa.concat_tables(tables)
+                        pq.write_table(merged, filepath)
+                        print(f"  Done: {merged.num_rows:,} rows -> {filepath}")
+                        return
+                    print(f"  Failed.")
+            except Exception as e:
+                print(f"  Error: {e}")
+
+        raise RuntimeError(
+            f"Failed to download source data from all sources.\n"
+            f"  Please manually place the file at: {filepath}"
+        )
 
     except Exception:
-        # Clean up partial output on failure
         if os.path.exists(filepath):
             os.remove(filepath)
         raise
     finally:
-        # Clean up downloaded parts
         import shutil
         shutil.rmtree(tmp_dir, ignore_errors=True)
 
