@@ -70,8 +70,8 @@ DIM_CONFIG = {
     },
     768: {
         "tables":       TABLES_768D,
-        "dist_fn":      "cosine_similarity",
-        "order":        "DESC",
+        "dist_fn":      "l2_distance",
+        "order":        "ASC",
         "query_table":  "cohere_user_1w",
         "label":        "768D (Cohere)",
         "suffix":       "768d",
