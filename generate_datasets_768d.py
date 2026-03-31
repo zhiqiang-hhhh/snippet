@@ -1,21 +1,18 @@
 #!/usr/bin/env python3
 """
-Generate 4 user-partitioned 768D vector embedding datasets from Cohere 1M source data.
+Generate the base 768D vector embedding dataset from Cohere 1M source data.
 
 Source: Cohere/wikipedia-22-12 768D float vectors (1M rows from VectorDBBench)
 
-Datasets:
-  - dataset_768d_1w:   100 users x 10,000 vectors   = 1M total
-  - dataset_768d_10w:  100 users x 100,000 vectors   = 10M total
-  - dataset_768d_50w:  100 users x 500,000 vectors   = 50M total
-  - dataset_768d_100w: 100 users x 1,000,000 vectors = 100M total
+Only generates the smallest dataset (dataset_768d_1w: 100 users x 10,000 vectors).
+Larger tables (10w/50w/100w) are built inside Doris via INSERT INTO SELECT ETL
+(see load_all.sh).
 
 Output format: TSV (tab-separated), gzip compressed, sharded by ~1M rows.
 Columns: user_id<TAB>id<TAB>[v1,v2,...,v768]
 
 Usage:
-  python3 generate_datasets_768d.py                    # generate all 4 (auto-downloads source if missing)
-  python3 generate_datasets_768d.py dataset_768d_1w    # generate only 1w
+  python3 generate_datasets_768d.py                    # generate base dataset (auto-downloads source if missing)
 """
 
 import gzip
@@ -68,9 +65,7 @@ FLOAT_FMT = "%.6g"       # 6 significant digits (float32 has ~7)
 
 DATASETS = [
     ("dataset_768d_1w",   10_000),
-    ("dataset_768d_10w",  100_000),
-    ("dataset_768d_50w",  500_000),
-    ("dataset_768d_100w", 1_000_000),
+    # Larger datasets (10w/50w/100w) are built via Doris ETL in load_all.sh
 ]
 
 # ─── Phase 0: Download source data if missing ────────────────────
@@ -293,19 +288,16 @@ def generate_dataset(dataset_name, vectors_per_user):
 def main():
     global EMBEDDINGS
 
-    target = sys.argv[1] if len(sys.argv) > 1 else None
-
     ensure_source_data(SOURCE_FILE)
     EMBEDDINGS = load_and_preformat(SOURCE_FILE)
 
     t0 = time.time()
     for dataset_name, vectors_per_user in DATASETS:
-        if target and dataset_name != target:
-            continue
         generate_dataset(dataset_name, vectors_per_user)
 
     elapsed = time.time() - t0
     print(f"\nAll done! Total generation time: {elapsed:.0f}s")
+    print(f"Next step: run load_all.sh to import into Doris and ETL-expand larger tables.")
 
 
 if __name__ == "__main__":
