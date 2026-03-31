@@ -6,3 +6,5 @@ search/data/*
 search/sift_1m/*
 compile_commands.json
 .DS_Store
+datasets
+benchmark_results*
