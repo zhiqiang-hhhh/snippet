@@ -105,8 +105,10 @@ def get_conn():
     return conn
 
 
-def load_query_vectors(dim_conf, n=NUM_QUERIES, seed=SEED):
+def load_query_vectors(dim_conf, n=None, seed=SEED):
     """Pick n random embedding vectors from the smallest table as query vectors."""
+    if n is None:
+        n = NUM_QUERIES
     conn = get_conn()
     rng = random.Random(seed)
     user_ids = rng.sample(range(100), min(n, 100))
@@ -154,11 +156,16 @@ def percentile(data, p):
     return sorted_d[f] + (k - f) * (sorted_d[c] - sorted_d[f])
 
 
-def run_bench(conn, sql_template, query_vecs, warmup=WARMUP_RUNS, runs=BENCH_RUNS):
+def run_bench(conn, sql_template, query_vecs, warmup=None, runs=None):
     """Run benchmark for a SQL template with {vec} placeholder.
 
     Returns dict with timing stats (in milliseconds).
     """
+    if warmup is None:
+        warmup = WARMUP_RUNS
+    if runs is None:
+        runs = BENCH_RUNS
+
     latencies = []
 
     for qi, qv in enumerate(query_vecs):
@@ -209,6 +216,7 @@ def test_scale(conn, query_vecs, dim_conf):
         stats = run_bench(conn, sql, query_vecs)
         stats["table"] = table
         stats["scale"] = label
+        stats["dist_fn"] = dist_fn
         results.append(stats)
         print(f"  avg={stats['avg_ms']:.1f}ms  p50={stats['p50_ms']:.1f}ms  p99={stats['p99_ms']:.1f}ms")
 
@@ -237,6 +245,7 @@ def test_topk(conn, query_vecs, dim_conf, table_key="10w"):
         stats = run_bench(conn, sql, query_vecs)
         stats["table"] = table
         stats["limit_k"] = k
+        stats["dist_fn"] = dist_fn
         results.append(stats)
         print(f"  avg={stats['avg_ms']:.1f}ms  p50={stats['p50_ms']:.1f}ms  p99={stats['p99_ms']:.1f}ms")
 
@@ -274,6 +283,7 @@ def test_filter(conn, query_vecs, dim_conf, table_key="10w"):
         stats = run_bench(conn, sql, query_vecs)
         stats["table"] = table
         stats["n_users"] = n_users
+        stats["dist_fn"] = dist_fn
         results.append(stats)
         print(f"  avg={stats['avg_ms']:.1f}ms  p50={stats['p50_ms']:.1f}ms  p99={stats['p99_ms']:.1f}ms")
 
@@ -371,6 +381,7 @@ def test_concurrency(query_vecs, dim_conf, table_key="10w", concurrency_levels=N
         stats = {
             "concurrency":  c_level,
             "table":        table,
+            "dist_fn":      dist_fn,
             "total_queries": total_queries,
             "wall_time_s":  round(wall_time, 2),
             "qps":          round(qps, 1),
@@ -407,6 +418,7 @@ def test_large_topk(conn, query_vecs, dim_conf, table_key="10w"):
         stats = run_bench(conn, sql, query_vecs)
         stats["table"] = table
         stats["limit_k"] = k
+        stats["dist_fn"] = dist_fn
         results.append(stats)
         print(f"  avg={stats['avg_ms']:.1f}ms  p50={stats['p50_ms']:.1f}ms  p99={stats['p99_ms']:.1f}ms")
 
@@ -433,6 +445,7 @@ def test_full_scan(conn, query_vecs, dim_conf):
         stats = run_bench(conn, sql, query_vecs, warmup=1, runs=5)
         stats["table"] = table
         stats["scale"] = label
+        stats["dist_fn"] = dist_fn
         results.append(stats)
         print(f"  avg={stats['avg_ms']:.1f}ms  p50={stats['p50_ms']:.1f}ms  p99={stats['p99_ms']:.1f}ms")
 
@@ -489,7 +502,7 @@ def test_cache_effect(conn, query_vecs, dim_conf, table_key="10w"):
     return pd.DataFrame(results), raw_df
 
 
-def test_concurrent_scale(query_vecs, dim_conf, concurrency_levels=None, duration=30):
+def test_concurrent_scale(query_vecs, dim_conf, concurrency_levels=None, duration=30, limit=10):
     """Scenario 9: Duration-based concurrent scale test.
 
     For every (table_scale x concurrency_level) combination, run queries for
@@ -508,7 +521,7 @@ def test_concurrent_scale(query_vecs, dim_conf, concurrency_levels=None, duratio
     print(f"Scenario 9: Concurrent Scale Test [{dim_conf['label']}]")
     print(f"  Concurrency levels: {concurrency_levels}")
     print(f"  Duration per case : {duration}s")
-    print(f"  Query: WHERE user_id=42 ORDER BY {dist_fn}(...) {order} LIMIT 10")
+    print(f"  Query: WHERE user_id=42 ORDER BY {dist_fn}(...) {order} LIMIT {limit}")
     print(f"{'=' * 60}")
 
     def worker(table, vec_str, stop_event):
@@ -518,7 +531,7 @@ def test_concurrent_scale(query_vecs, dim_conf, concurrency_levels=None, duratio
         sql = (f"SELECT id FROM {table} "
                f"WHERE user_id = 42 "
                f"ORDER BY {dist_fn}(embedding, {vec}) {order} "
-               f"LIMIT 10")
+               f"LIMIT {limit}")
         latencies = []
         while not stop_event.is_set():
             t0 = time.perf_counter()
@@ -548,7 +561,7 @@ def test_concurrent_scale(query_vecs, dim_conf, concurrency_levels=None, duratio
         sql_w = (f"SELECT id FROM {table} "
                  f"WHERE user_id = 42 "
                  f"ORDER BY {dist_fn}(embedding, {vec}) {order} "
-                 f"LIMIT 10")
+                 f"LIMIT {limit}")
         for _ in range(3):
             run_query(wconn, sql_w)
         wconn.close()
@@ -578,6 +591,8 @@ def test_concurrent_scale(query_vecs, dim_conf, concurrency_levels=None, duratio
                 "scale":         label,
                 "table":         table,
                 "concurrency":   c_level,
+                "limit":         limit,
+                "dist_fn":       dist_fn,
                 "duration_s":    duration,
                 "total_queries": total_queries,
                 "wall_time_s":   round(wall_time, 2),
@@ -655,6 +670,7 @@ def test_high_concurrency(query_vecs, dim_conf, table_key="10w", concurrency_lev
         stats = {
             "concurrency":   c_level,
             "table":         table,
+            "dist_fn":       dist_fn,
             "total_queries": total_queries,
             "wall_time_s":   round(wall_time, 2),
             "qps":           round(qps, 1),
@@ -683,7 +699,7 @@ def setup_plot_style():
     })
 
 
-def plot_scale(df, output_dir):
+def plot_scale(df, output_dir, dist_fn="l2_distance"):
     """Bar chart: latency across table sizes."""
     fig, ax = plt.subplots()
     x = np.arange(len(df))
@@ -695,7 +711,7 @@ def plot_scale(df, output_dir):
 
     ax.set_xlabel("Vectors per User")
     ax.set_ylabel("Latency (ms)")
-    ax.set_title("Scenario 1: Latency vs Data Scale\n(user_id=42, LIMIT 10, l2_distance)")
+    ax.set_title(f"Scenario 1: Latency vs Data Scale\n(user_id=42, LIMIT 10, {dist_fn})")
     ax.set_xticks(x)
     ax.set_xticklabels(df["scale"])
     ax.legend()
@@ -710,7 +726,7 @@ def plot_scale(df, output_dir):
     print(f"  Saved {path}")
 
 
-def plot_topk(df, output_dir):
+def plot_topk(df, output_dir, dist_fn="l2_distance"):
     """Line chart: latency vs LIMIT K."""
     fig, ax = plt.subplots()
 
@@ -720,7 +736,7 @@ def plot_topk(df, output_dir):
 
     ax.set_xlabel("Top-K (LIMIT)")
     ax.set_ylabel("Latency (ms)")
-    ax.set_title(f"Scenario 2: Latency vs Top-K\n({df['table'].iloc[0]}, user_id=42, l2_distance)")
+    ax.set_title(f"Scenario 2: Latency vs Top-K\n({df['table'].iloc[0]}, user_id=42, {dist_fn})")
     ax.legend()
 
     plt.tight_layout()
@@ -730,7 +746,7 @@ def plot_topk(df, output_dir):
     print(f"  Saved {path}")
 
 
-def plot_filter(df, output_dir):
+def plot_filter(df, output_dir, dist_fn="l2_distance"):
     """Bar chart: latency vs number of users in filter."""
     fig, ax = plt.subplots()
     x = np.arange(len(df))
@@ -742,7 +758,7 @@ def plot_filter(df, output_dir):
 
     ax.set_xlabel("Number of Users in Filter")
     ax.set_ylabel("Latency (ms)")
-    ax.set_title(f"Scenario 3: Latency vs Filter Selectivity\n({df['table'].iloc[0]}, LIMIT 10, l2_distance)")
+    ax.set_title(f"Scenario 3: Latency vs Filter Selectivity\n({df['table'].iloc[0]}, LIMIT 10, {dist_fn})")
     ax.set_xticks(x)
     ax.set_xticklabels(df["n_users"])
     ax.legend()
@@ -785,7 +801,7 @@ def plot_distance_fn(df, output_dir):
     print(f"  Saved {path}")
 
 
-def plot_concurrency(df, output_dir):
+def plot_concurrency(df, output_dir, dist_fn="l2_distance"):
     """Dual-axis chart: QPS and P99 vs concurrency."""
     fig, ax1 = plt.subplots()
     ax2 = ax1.twinx()
@@ -798,7 +814,7 @@ def plot_concurrency(df, output_dir):
     ax1.set_xlabel("Concurrency")
     ax1.set_ylabel("QPS", color="#4C72B0")
     ax2.set_ylabel("Latency (ms)", color="#C44E52")
-    ax1.set_title(f"Scenario 5: Concurrency Test\n({df['table'].iloc[0]}, user_id=42, LIMIT 10)")
+    ax1.set_title(f"Scenario 5: Concurrency Test\n({df['table'].iloc[0]}, user_id=42, LIMIT 10, {dist_fn})")
     ax1.xaxis.set_major_locator(MaxNLocator(integer=True))
 
     lines1, labels1 = ax1.get_legend_handles_labels()
@@ -812,7 +828,7 @@ def plot_concurrency(df, output_dir):
     print(f"  Saved {path}")
 
 
-def plot_large_topk(df, output_dir):
+def plot_large_topk(df, output_dir, dist_fn="l2_distance"):
     """Line chart: latency vs large LIMIT K values."""
     fig, ax = plt.subplots()
 
@@ -822,7 +838,7 @@ def plot_large_topk(df, output_dir):
 
     ax.set_xlabel("Top-K (LIMIT)")
     ax.set_ylabel("Latency (ms)")
-    ax.set_title(f"Scenario 6: Large Top-K Test\n({df['table'].iloc[0]}, user_id=42, l2_distance)")
+    ax.set_title(f"Scenario 6: Large Top-K Test\n({df['table'].iloc[0]}, user_id=42, {dist_fn})")
     ax.legend()
 
     plt.tight_layout()
@@ -832,7 +848,7 @@ def plot_large_topk(df, output_dir):
     print(f"  Saved {path}")
 
 
-def plot_full_scan(df, output_dir):
+def plot_full_scan(df, output_dir, dist_fn="l2_distance"):
     """Bar chart: full scan latency across table sizes."""
     fig, ax = plt.subplots()
     x = np.arange(len(df))
@@ -844,7 +860,7 @@ def plot_full_scan(df, output_dir):
 
     ax.set_xlabel("Total Rows in Table")
     ax.set_ylabel("Latency (ms)")
-    ax.set_title("Scenario 7: Full Table Scan (no user_id filter)\n(LIMIT 10, l2_distance)")
+    ax.set_title(f"Scenario 7: Full Table Scan (no user_id filter)\n(LIMIT 10, {dist_fn})")
     ax.set_xticks(x)
     ax.set_xticklabels(df["scale"])
     ax.legend()
@@ -884,7 +900,7 @@ def plot_cache_effect(raw_df, output_dir):
     print(f"  Saved {path}")
 
 
-def plot_concurrent_scale(df, output_dir):
+def plot_concurrent_scale(df, output_dir, dist_fn="l2_distance"):
     """Multi-panel chart: QPS and latency across table sizes x concurrency levels.
 
     Generates two charts:
@@ -893,7 +909,6 @@ def plot_concurrent_scale(df, output_dir):
     """
     concurrency_levels = sorted(df["concurrency"].unique())
     scales = list(dict.fromkeys(df["scale"]))  # preserve order
-    dist_fn = "cosine_similarity" if "cohere" in df["table"].iloc[0] else "l2_distance"
     dur = df["duration_s"].iloc[0] if "duration_s" in df.columns else "?"
 
     # ── Chart 09a: QPS grouped bar ──
@@ -971,7 +986,7 @@ def plot_concurrent_scale(df, output_dir):
     print(f"  Saved {path_c}")
 
 
-def plot_high_concurrency(df, output_dir):
+def plot_high_concurrency(df, output_dir, dist_fn="l2_distance"):
     """Dual-axis chart: QPS and latency vs extended concurrency."""
     fig, ax1 = plt.subplots()
     ax2 = ax1.twinx()
@@ -984,7 +999,7 @@ def plot_high_concurrency(df, output_dir):
     ax1.set_xlabel("Concurrency")
     ax1.set_ylabel("QPS", color="#4C72B0")
     ax2.set_ylabel("Latency (ms)", color="#C44E52")
-    ax1.set_title(f"Scenario 10: High Concurrency Test\n({df['table'].iloc[0]}, user_id=42, LIMIT 10)")
+    ax1.set_title(f"Scenario 10: High Concurrency Test\n({df['table'].iloc[0]}, user_id=42, LIMIT 10, {dist_fn})")
     ax1.xaxis.set_major_locator(MaxNLocator(integer=True))
 
     lines1, labels1 = ax1.get_legend_handles_labels()
@@ -996,6 +1011,148 @@ def plot_high_concurrency(df, output_dir):
     fig.savefig(path)
     plt.close(fig)
     print(f"  Saved {path}")
+
+
+# ─── Repair Report ───────────────────────────────────────────────
+
+# Map scenario name -> plot function name (for dispatch)
+_SCENARIO_PLOTTERS = {
+    "scale":       "plot_scale",
+    "topk":        "plot_topk",
+    "filter":      "plot_filter",
+    "distfn":      "plot_distance_fn",
+    "concurrency": "plot_concurrency",
+    "largetopk":   "plot_large_topk",
+    "fullscan":    "plot_full_scan",
+    "cache":       "plot_cache_effect",
+    "concscale":   "plot_concurrent_scale",
+    "highconc":    "plot_high_concurrency",
+}
+
+
+def repair_report(report_dir, dim_conf):
+    """Repair an existing benchmark report directory.
+
+    Fixes:
+      1. JSON summary — adds missing 'dist_fn' (and 'limit' for concscale) fields
+      2. CSV files   — adds missing 'dist_fn' (and 'limit' for concscale) columns
+      3. PNG charts  — regenerated from patched data with correct dist_fn in titles
+
+    Args:
+        report_dir: path to the benchmark_results_* directory
+        dim_conf:   DIM_CONFIG entry (determines correct dist_fn)
+    """
+    import glob as globmod
+
+    dist_fn = dim_conf["dist_fn"]
+
+    print("=" * 60)
+    print(f"  Repair Report: {report_dir}")
+    print(f"  dist_fn = {dist_fn}")
+    print("=" * 60)
+
+    # ── 1. Find and patch JSON ──
+    json_files = sorted(globmod.glob(os.path.join(report_dir, "summary_*.json")))
+    for jf in json_files:
+        print(f"\n[JSON] Patching {os.path.basename(jf)}")
+        with open(jf) as f:
+            summary = json.load(f)
+
+        changed = False
+        for scenario_name, records in summary.items():
+            for rec in records:
+                # Add dist_fn if missing or wrong
+                if scenario_name == "distfn":
+                    # Scenario 4 already has per-row 'function' field; skip dist_fn
+                    continue
+                if rec.get("dist_fn") != dist_fn:
+                    rec["dist_fn"] = dist_fn
+                    changed = True
+                # Add limit for concscale if missing
+                if scenario_name == "concscale" and "limit" not in rec:
+                    rec["limit"] = 10
+                    changed = True
+
+        if changed:
+            with open(jf, "w") as f:
+                json.dump(summary, f, indent=2)
+            print(f"  [OK] Patched")
+        else:
+            print(f"  [OK] Already correct, no changes needed")
+
+    # ── 2. Find and patch CSV ──
+    csv_files = sorted(globmod.glob(os.path.join(report_dir, "*.csv")))
+    for cf in csv_files:
+        basename = os.path.basename(cf)
+        # Infer scenario name from csv filename: <scenario>_<timestamp>.csv
+        scenario_name = basename.rsplit("_", 2)[0] if basename.count("_") >= 2 else basename.rsplit("_", 1)[0]
+        # cache_raw doesn't need dist_fn
+        if scenario_name == "cache_raw":
+            continue
+        # distfn has per-row 'function', not a global dist_fn
+        if scenario_name == "distfn":
+            continue
+
+        print(f"\n[CSV]  Patching {basename}")
+        df = pd.read_csv(cf)
+        patched = False
+
+        if "dist_fn" not in df.columns or (df["dist_fn"] != dist_fn).any():
+            df["dist_fn"] = dist_fn
+            patched = True
+        if scenario_name == "concscale" and "limit" not in df.columns:
+            df["limit"] = 10
+            patched = True
+
+        if patched:
+            df.to_csv(cf, index=False)
+            print(f"  [OK] Patched")
+        else:
+            print(f"  [OK] Already correct")
+
+    # ── 3. Regenerate PNG charts from patched data ──
+    print(f"\n[PLOT] Regenerating charts...")
+    setup_plot_style()
+
+    # Re-read patched JSON to get DataFrames
+    if not json_files:
+        print("  [SKIP] No summary JSON found, cannot regenerate charts")
+        return
+
+    with open(json_files[-1]) as f:
+        summary = json.load(f)
+
+    for scenario_name, records in summary.items():
+        if scenario_name == "cache_raw":
+            continue
+        df = pd.DataFrame(records)
+
+        # Dispatch to the right plot function
+        plot_fn_name = _SCENARIO_PLOTTERS.get(scenario_name)
+        if plot_fn_name is None:
+            print(f"  [SKIP] Unknown scenario '{scenario_name}', no plotter")
+            continue
+
+        plot_fn = globals().get(plot_fn_name)
+        if plot_fn is None:
+            print(f"  [SKIP] Plot function '{plot_fn_name}' not found")
+            continue
+
+        try:
+            # cache scenario uses raw_df, handle specially
+            if scenario_name == "cache" and "cache_raw" in summary:
+                raw_df = pd.DataFrame(summary["cache_raw"])
+                plot_fn(raw_df, report_dir)
+            elif scenario_name in ("distfn", "cache"):
+                # distfn and cache plot functions don't take dist_fn
+                plot_fn(df, report_dir)
+            else:
+                plot_fn(df, report_dir, dist_fn)
+            print(f"  [OK] {scenario_name} -> {plot_fn_name}")
+        except Exception as e:
+            print(f"  [FAIL] {scenario_name}: {e}")
+
+    print(f"\nRepair complete! Results in {report_dir}/")
 
 
 # ─── Main ────────────────────────────────────────────────────────
@@ -1041,7 +1198,27 @@ def main():
                         help="Concurrency levels for concscale test (default: 1 4 8 16 32)")
     parser.add_argument("--duration", type=int, default=30,
                         help="Duration in seconds for each concscale test case (default: 30)")
+    parser.add_argument("--limit", type=int, default=10,
+                        help="LIMIT N for concscale queries (default: 10)")
+    parser.add_argument("--tables", nargs="+", default=None, metavar="SCALE",
+                        help="Table scales to test for multi-table scenarios\n"
+                             "(scale, fullscan, concscale). E.g. --tables 1w 10w\n"
+                             "(default: all 4 scales: 1w 10w 50w 100w)")
+    parser.add_argument("--table-key", default=None, metavar="SCALE",
+                        help="Table scale for single-table scenarios\n"
+                             "(topk, filter, distfn, concurrency, largetopk, cache, highconc)\n"
+                             "E.g. --table-key 50w  (default: 10w)")
+    parser.add_argument("--repair-report", metavar="DIR",
+                        help="Repair an existing report directory: fix dist_fn in JSON/CSV\n"
+                             "and regenerate PNG charts. Requires --dim to specify the\n"
+                             "correct distance function. No Doris connection needed.")
     args = parser.parse_args()
+
+    # ── Repair mode: fix existing report and exit ──
+    if args.repair_report:
+        dim_conf = DIM_CONFIG[args.dim]
+        repair_report(args.repair_report, dim_conf)
+        return
 
     DORIS_HOST = args.host
     DORIS_PORT = args.port
@@ -1060,6 +1237,27 @@ def main():
     dim_conf = DIM_CONFIG[args.dim]
     TABLES = dim_conf["tables"]
 
+    # Filter tables if --tables specified
+    if args.tables:
+        invalid = [t for t in args.tables if t not in dim_conf["tables"]]
+        if invalid:
+            parser.error(f"Unknown table scale(s): {invalid}. "
+                         f"Valid: {list(dim_conf['tables'].keys())}")
+        dim_conf = dict(dim_conf)  # shallow copy to avoid mutating global
+        dim_conf["tables"] = {k: v for k, v in dim_conf["tables"].items() if k in args.tables}
+        TABLES = dim_conf["tables"]
+
+    # Resolve table_key for single-table scenarios
+    table_key = args.table_key or "10w"
+    if table_key not in dim_conf["tables"]:
+        # table_key not in filtered set — check if it exists in the full config
+        full_tables = DIM_CONFIG[args.dim]["tables"]
+        if table_key not in full_tables:
+            parser.error(f"Unknown table-key '{table_key}'. "
+                         f"Valid: {list(full_tables.keys())}")
+        # table_key exists but was filtered out by --tables; use original full tables for lookup
+        # (single-table scenarios don't need to be in the --tables filter)
+
     # Append dimension suffix to output dir if not already present
     output_dir = args.output
     if not output_dir.endswith(dim_conf["suffix"]):
@@ -1076,6 +1274,7 @@ def main():
     print(f"  Host: {DORIS_HOST}:{DORIS_PORT}  DB: {DORIS_DB}")
     print(f"  Dim: {args.dim}  Dist: {dim_conf['dist_fn']}")
     print(f"  Runs: {BENCH_RUNS}  Query vectors: {NUM_QUERIES}")
+    print(f"  Tables: {list(dim_conf['tables'].keys())}  Table-key: {table_key}")
     print(f"  Parallelism: {args.parallel if args.parallel > 0 else 'auto'}")
     print(f"  Output: {output_dir}/")
     if not run_all:
@@ -1090,46 +1289,47 @@ def main():
     conn = get_conn()
     all_results = {}
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    dist_fn = dim_conf["dist_fn"]
 
     # Scenario 1: Scale test
     if run_all or "scale" in scenarios:
         df = test_scale(conn, query_vecs, dim_conf)
         all_results["scale"] = df
-        plot_scale(df, output_dir)
+        plot_scale(df, output_dir, dist_fn)
 
     # Scenario 2: Top-K test
     if run_all or "topk" in scenarios:
-        df = test_topk(conn, query_vecs, dim_conf, table_key="10w")
+        df = test_topk(conn, query_vecs, dim_conf, table_key=table_key)
         all_results["topk"] = df
-        plot_topk(df, output_dir)
+        plot_topk(df, output_dir, dist_fn)
 
     # Scenario 3: Filter selectivity
     if run_all or "filter" in scenarios:
-        df = test_filter(conn, query_vecs, dim_conf, table_key="10w")
+        df = test_filter(conn, query_vecs, dim_conf, table_key=table_key)
         all_results["filter"] = df
-        plot_filter(df, output_dir)
+        plot_filter(df, output_dir, dist_fn)
 
     # Scenario 4: Distance function comparison
     if run_all or "distfn" in scenarios:
-        df = test_distance_fn(conn, query_vecs, dim_conf, table_key="10w")
+        df = test_distance_fn(conn, query_vecs, dim_conf, table_key=table_key)
         all_results["distfn"] = df
         plot_distance_fn(df, output_dir)
 
     # Scenario 6: Large Top-K test
     if run_all or "largetopk" in scenarios:
-        df = test_large_topk(conn, query_vecs, dim_conf, table_key="10w")
+        df = test_large_topk(conn, query_vecs, dim_conf, table_key=table_key)
         all_results["largetopk"] = df
-        plot_large_topk(df, output_dir)
+        plot_large_topk(df, output_dir, dist_fn)
 
     # Scenario 7: Full scan test
     if run_all or "fullscan" in scenarios:
         df = test_full_scan(conn, query_vecs, dim_conf)
         all_results["fullscan"] = df
-        plot_full_scan(df, output_dir)
+        plot_full_scan(df, output_dir, dist_fn)
 
     # Scenario 8: Cache effect test
     if run_all or "cache" in scenarios:
-        summary_df, raw_df = test_cache_effect(conn, query_vecs, dim_conf, table_key="10w")
+        summary_df, raw_df = test_cache_effect(conn, query_vecs, dim_conf, table_key=table_key)
         all_results["cache"] = summary_df
         all_results["cache_raw"] = raw_df
         plot_cache_effect(raw_df, output_dir)
@@ -1138,23 +1338,24 @@ def main():
 
     # Scenario 5: Concurrency (uses its own connections)
     if run_all or "concurrency" in scenarios:
-        df = test_concurrency(query_vecs, dim_conf, table_key="10w")
+        df = test_concurrency(query_vecs, dim_conf, table_key=table_key)
         all_results["concurrency"] = df
-        plot_concurrency(df, output_dir)
+        plot_concurrency(df, output_dir, dist_fn)
 
     # Scenario 9: Concurrent scale test
     if run_all or "concscale" in scenarios:
         df = test_concurrent_scale(query_vecs, dim_conf,
                                    concurrency_levels=args.concurrency_levels,
-                                   duration=args.duration)
+                                   duration=args.duration,
+                                   limit=args.limit)
         all_results["concscale"] = df
-        plot_concurrent_scale(df, output_dir)
+        plot_concurrent_scale(df, output_dir, dist_fn)
 
     # Scenario 10: High concurrency test
     if run_all or "highconc" in scenarios:
-        df = test_high_concurrency(query_vecs, dim_conf, table_key="10w")
+        df = test_high_concurrency(query_vecs, dim_conf, table_key=table_key)
         all_results["highconc"] = df
-        plot_high_concurrency(df, output_dir)
+        plot_high_concurrency(df, output_dir, dist_fn)
 
     # Save all results to CSV
     print(f"\n{'=' * 60}")
