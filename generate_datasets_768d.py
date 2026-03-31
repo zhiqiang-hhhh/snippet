@@ -14,7 +14,7 @@ Output format: TSV (tab-separated), gzip compressed, sharded by ~1M rows.
 Columns: user_id<TAB>id<TAB>[v1,v2,...,v768]
 
 Usage:
-  python3 generate_datasets_768d.py                    # generate all 4
+  python3 generate_datasets_768d.py                    # generate all 4 (auto-downloads source if missing)
   python3 generate_datasets_768d.py dataset_768d_1w    # generate only 1w
 """
 
@@ -22,12 +22,22 @@ import gzip
 import os
 import sys
 import time
+import tempfile
 import numpy as np
 from multiprocessing import Pool
 import pyarrow.parquet as pq
+import pyarrow as pa
 
 # Configuration
 SOURCE_FILE = "datasets/source_768d/cohere_1m_train.parquet"
+
+HF_PARTS = [
+    "train-00000-of-00004-1a1932c9ca1c7152.parquet",
+    "train-00001-of-00004-f4a4f5540ade14b4.parquet",
+    "train-00002-of-00004-ff770df3ab420d14.parquet",
+    "train-00003-of-00004-85b3dbbc960e92ec.parquet",
+]
+HF_BASE_URL = "https://huggingface.co/datasets/Cohere/wikipedia-22-12-simple-embeddings/resolve/main/data"
 OUTPUT_BASE = "datasets"
 NUM_USERS = 100
 SHARD_SIZE = 1_000_000   # rows per shard
@@ -43,6 +53,54 @@ DATASETS = [
     ("dataset_768d_50w",  500_000),
     ("dataset_768d_100w", 1_000_000),
 ]
+
+# ─── Phase 0: Download source data if missing ────────────────────
+
+def ensure_source_data(filepath):
+    """Download and merge parquet shards from HuggingFace if source file is missing."""
+    if os.path.exists(filepath):
+        print(f"Source file already exists: {filepath}")
+        return
+
+    print(f"Source file not found: {filepath}")
+    print(f"Downloading from HuggingFace (Cohere/wikipedia-22-12-simple-embeddings)...")
+
+    source_dir = os.path.dirname(filepath)
+    os.makedirs(source_dir, exist_ok=True)
+
+    tmp_dir = tempfile.mkdtemp(prefix="cohere_dl_", dir=source_dir)
+
+    try:
+        # Download all parts
+        for i, filename in enumerate(HF_PARTS):
+            url = f"{HF_BASE_URL}/{filename}"
+            dest = os.path.join(tmp_dir, filename)
+            print(f"  Downloading part {i+1}/{len(HF_PARTS)}: {filename}...")
+            ret = os.system(f'curl -L --fail --retry 3 --retry-delay 5 -o "{dest}" "{url}"')
+            if ret != 0:
+                raise RuntimeError(f"Failed to download {url}")
+
+        # Merge into single parquet (emb column only)
+        print("  Merging parquet files...")
+        tables = []
+        for filename in HF_PARTS:
+            part_path = os.path.join(tmp_dir, filename)
+            t = pq.read_table(part_path, columns=["emb"])
+            tables.append(t)
+        merged = pa.concat_tables(tables)
+        pq.write_table(merged, filepath)
+        print(f"  Done: {merged.num_rows:,} rows -> {filepath}")
+
+    except Exception:
+        # Clean up partial output on failure
+        if os.path.exists(filepath):
+            os.remove(filepath)
+        raise
+    finally:
+        # Clean up downloaded parts
+        import shutil
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+
 
 # ─── Phase 1: Load and pre-format source vectors ──────────────────
 # Globals inherited by fork (copy-on-write)
@@ -187,6 +245,7 @@ def main():
 
     target = sys.argv[1] if len(sys.argv) > 1 else None
 
+    ensure_source_data(SOURCE_FILE)
     EMBEDDINGS = load_and_preformat(SOURCE_FILE)
 
     t0 = time.time()
