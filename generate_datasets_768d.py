@@ -38,6 +38,7 @@ HF_PARTS = [
     "train-00003-of-00004-85b3dbbc960e92ec.parquet",
 ]
 HF_BASE_URL = "https://huggingface.co/datasets/Cohere/wikipedia-22-12-simple-embeddings/resolve/main/data"
+HF_MIRROR_URL = "https://hf-mirror.com/datasets/Cohere/wikipedia-22-12-simple-embeddings/resolve/main/data"
 OUTPUT_BASE = "datasets"
 NUM_USERS = 100
 SHARD_SIZE = 1_000_000   # rows per shard
@@ -56,14 +57,34 @@ DATASETS = [
 
 # ─── Phase 0: Download source data if missing ────────────────────
 
+def _download_file(url, dest, timeout=30):
+    """Try to download a file, return True on success."""
+    ret = os.system(
+        f'curl -L --fail --retry 3 --retry-delay 5 '
+        f'--connect-timeout {timeout} -o "{dest}" "{url}"'
+    )
+    return ret == 0
+
+
 def ensure_source_data(filepath):
-    """Download and merge parquet shards from HuggingFace if source file is missing."""
+    """Download and merge parquet shards from HuggingFace if source file is missing.
+
+    Tries hf-mirror.com (China mirror) first, falls back to huggingface.co.
+    Can be overridden via env var HF_ENDPOINT, e.g.:
+        HF_ENDPOINT=https://your-mirror.com/datasets/... python3 generate_datasets_768d.py
+    """
     if os.path.exists(filepath):
         print(f"Source file already exists: {filepath}")
         return
 
+    env_endpoint = os.environ.get("HF_ENDPOINT")
+    if env_endpoint:
+        urls = [env_endpoint.rstrip("/")]
+    else:
+        urls = [HF_MIRROR_URL, HF_BASE_URL]
+
     print(f"Source file not found: {filepath}")
-    print(f"Downloading from HuggingFace (Cohere/wikipedia-22-12-simple-embeddings)...")
+    print(f"Will try endpoints in order: {urls}")
 
     source_dir = os.path.dirname(filepath)
     os.makedirs(source_dir, exist_ok=True)
@@ -71,14 +92,23 @@ def ensure_source_data(filepath):
     tmp_dir = tempfile.mkdtemp(prefix="cohere_dl_", dir=source_dir)
 
     try:
-        # Download all parts
+        # Download all parts, trying each endpoint
         for i, filename in enumerate(HF_PARTS):
-            url = f"{HF_BASE_URL}/{filename}"
             dest = os.path.join(tmp_dir, filename)
-            print(f"  Downloading part {i+1}/{len(HF_PARTS)}: {filename}...")
-            ret = os.system(f'curl -L --fail --retry 3 --retry-delay 5 -o "{dest}" "{url}"')
-            if ret != 0:
-                raise RuntimeError(f"Failed to download {url}")
+            downloaded = False
+            for base_url in urls:
+                url = f"{base_url}/{filename}"
+                print(f"  [{i+1}/{len(HF_PARTS)}] Trying {url} ...")
+                if _download_file(url, dest):
+                    downloaded = True
+                    break
+                print(f"         Failed, trying next endpoint...")
+            if not downloaded:
+                raise RuntimeError(
+                    f"Failed to download {filename} from all endpoints.\n"
+                    f"  You can set HF_ENDPOINT env var to specify a custom mirror, or\n"
+                    f"  manually place the source file at: {filepath}"
+                )
 
         # Merge into single parquet (emb column only)
         print("  Merging parquet files...")
