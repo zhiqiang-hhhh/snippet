@@ -1,17 +1,46 @@
 #!/usr/bin/env bash
 #
 # deploy_monitoring.sh
-# 一键部署 Node Exporter + Prometheus + Grafana 监控系统
+# 一键部署 Node Exporter + Prometheus + Grafana 监控系统 (含 Apache Doris 集群监控)
 #
 # 执行环境: 172.20.56.74 (root 用户)
 # 架构:
 #   - 172.20.56.74: Prometheus + Grafana + Node Exporter  (数据目录: /mnt/disk2/hzq)
 #   - 172.20.56.83/84/85: Node Exporter                   (数据目录: /mnt/disk1/hzq)
+#   - Doris FE/BE: 通过 SHOW FRONTENDS/BACKENDS 自动发现, 采集 /metrics 端点
 #
-# 用法: bash deploy_monitoring.sh
+# 用法: bash deploy_monitoring.sh [--force]
+#   --force  强制重新部署所有组件 (跳过幂等检查)
 #
 
 set -euo pipefail
+
+########################################
+# 命令行参数解析
+########################################
+FORCE_DEPLOY=0
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --force|-f)
+            FORCE_DEPLOY=1
+            shift
+            ;;
+        --help|-h)
+            echo "用法: bash deploy_monitoring.sh [--force]"
+            echo ""
+            echo "选项:"
+            echo "  --force, -f   强制重新部署所有组件 (跳过幂等检查)"
+            echo "  --help, -h    显示帮助信息"
+            exit 0
+            ;;
+        *)
+            echo "未知选项: $1"
+            echo "用法: bash deploy_monitoring.sh [--force]"
+            exit 1
+            ;;
+    esac
+done
 
 ########################################
 # 配置区 - 按需修改
@@ -57,6 +86,16 @@ GRAFANA_PKG="grafana-${GRAFANA_VERSION}.linux-amd64.tar.gz"
 NODE_EXPORTER_DIR="node_exporter-${NODE_EXPORTER_VERSION}.linux-amd64"
 PROMETHEUS_DIR="prometheus-${PROMETHEUS_VERSION}.linux-amd64"
 GRAFANA_DIR="grafana-v${GRAFANA_VERSION}"
+
+# Doris 集群配置 (通过连接 FE 自动发现所有 FE/BE 节点)
+DORIS_FE_HOST="172.20.56.74"             # 任意一个 FE 的 IP
+DORIS_FE_QUERY_PORT=9030                  # FE MySQL 协议端口
+DORIS_USER="root"                         # Doris 登录用户
+DORIS_PASSWORD=""                         # Doris 登录密码 (空则免密)
+
+# 以下由 discover_doris_cluster() 自动填充, 无需手动配置
+DORIS_FE_TARGETS=()                       # FE http 端点列表, 如 ("ip:8030" ...)
+DORIS_BE_TARGETS=()                       # BE http 端点列表, 如 ("ip:8040" ...)
 
 ########################################
 # 颜色输出
@@ -193,6 +232,133 @@ preflight_check() {
 }
 
 ########################################
+# Step 0.5: 自动发现 Doris 集群节点
+########################################
+discover_doris_cluster() {
+    log_step "Step 0.5: 自动发现 Doris 集群节点"
+
+    # 检查 mysql 客户端
+    if ! check_cmd mysql; then
+        log_warn "mysql 客户端未安装, 尝试自动安装..."
+        if check_cmd apt-get; then
+            apt-get update -qq && apt-get install -y -qq mysql-client 2>/dev/null || true
+        elif check_cmd yum; then
+            yum install -y -q mysql 2>/dev/null || yum install -y -q mariadb 2>/dev/null || true
+        fi
+    fi
+
+    if ! check_cmd mysql; then
+        log_error "mysql 客户端不可用, 无法自动发现 Doris 集群"
+        log_error "请安装 mysql 客户端: yum install -y mysql 或 apt-get install -y mysql-client"
+        log_error "或者手动在脚本配置区填写 DORIS_FE_TARGETS 和 DORIS_BE_TARGETS"
+        exit 1
+    fi
+
+    # 构造 mysql 连接命令
+    local mysql_cmd="mysql -h ${DORIS_FE_HOST} -P ${DORIS_FE_QUERY_PORT} -u ${DORIS_USER} --batch --skip-column-names"
+    if [[ -n "${DORIS_PASSWORD}" ]]; then
+        mysql_cmd="${mysql_cmd} -p${DORIS_PASSWORD}"
+    fi
+
+    # 测试连接
+    log_info "连接 Doris FE: ${DORIS_FE_HOST}:${DORIS_FE_QUERY_PORT} ..."
+    if ! ${mysql_cmd} -e "SELECT 1" &>/dev/null; then
+        log_error "无法连接 Doris FE (${DORIS_FE_HOST}:${DORIS_FE_QUERY_PORT})"
+        log_error "请检查 DORIS_FE_HOST / DORIS_FE_QUERY_PORT / DORIS_USER / DORIS_PASSWORD 配置"
+        exit 1
+    fi
+    log_info "  ✓ Doris FE 连接成功"
+
+    # 获取 FE 列表
+    # SHOW FRONTENDS 输出列: Name | Host | EditLogPort | HttpPort | QueryPort | ...
+    log_info "查询 SHOW FRONTENDS ..."
+    local fe_output
+    fe_output=$(${mysql_cmd} -e "SHOW FRONTENDS" 2>/dev/null)
+    if [[ -z "${fe_output}" ]]; then
+        log_error "SHOW FRONTENDS 返回为空"
+        exit 1
+    fi
+
+    # 解析 FE: 提取 Host 和 HttpPort 列
+    # 先获取列头确定列位置
+    local fe_header
+    fe_header=$(${mysql_cmd} --column-names -e "SHOW FRONTENDS" 2>/dev/null | head -1)
+
+    # 使用 awk 按列名定位
+    while IFS=$'\t' read -r line; do
+        local fe_host fe_http_port
+        # SHOW FRONTENDS 的列顺序: Name, Host, EditLogPort, HttpPort, QueryPort, RpcPort, ...
+        # 用 awk 按 tab 分割取各字段
+        fe_host=$(echo "${line}" | awk -F'\t' '{print $2}')
+        fe_http_port=$(echo "${line}" | awk -F'\t' '{print $4}')
+        if [[ -n "${fe_host}" && -n "${fe_http_port}" && "${fe_http_port}" =~ ^[0-9]+$ ]]; then
+            DORIS_FE_TARGETS+=("${fe_host}:${fe_http_port}")
+            log_info "  发现 FE: ${fe_host}:${fe_http_port}"
+        fi
+    done <<< "${fe_output}"
+
+    if [[ ${#DORIS_FE_TARGETS[@]} -eq 0 ]]; then
+        log_error "未发现任何 Doris FE 节点"
+        exit 1
+    fi
+
+    # 获取 BE 列表
+    # SHOW BACKENDS 输出列: BackendId | Host | ... | HttpPort | ...
+    log_info "查询 SHOW BACKENDS ..."
+    local be_output
+    be_output=$(${mysql_cmd} -e "SHOW BACKENDS" 2>/dev/null)
+    if [[ -z "${be_output}" ]]; then
+        log_error "SHOW BACKENDS 返回为空"
+        exit 1
+    fi
+
+    # 解析 BE: 需要找到 Host 列和 HttpPort 列的位置
+    # SHOW BACKENDS 列较多且不同版本可能有差异, 用列头动态定位更安全
+    local be_header_line
+    be_header_line=$(${mysql_cmd} --column-names -e "SHOW BACKENDS" 2>/dev/null | head -1)
+
+    # 找到 Host 和 HttpPort 的列号
+    local host_col=0
+    local http_port_col=0
+    local col_idx=1
+    IFS=$'\t' read -ra be_cols <<< "${be_header_line}"
+    for col in "${be_cols[@]}"; do
+        # 去除可能的空格
+        col=$(echo "${col}" | tr -d ' ')
+        if [[ "${col}" == "Host" ]]; then
+            host_col=${col_idx}
+        elif [[ "${col}" == "HttpPort" ]]; then
+            http_port_col=${col_idx}
+        fi
+        col_idx=$((col_idx + 1))
+    done
+
+    if [[ ${host_col} -eq 0 || ${http_port_col} -eq 0 ]]; then
+        log_warn "无法从列头定位 BE 的 Host/HttpPort 列, 使用默认位置 (col2/col5)"
+        host_col=2
+        http_port_col=5
+    fi
+
+    while IFS=$'\t' read -r line; do
+        local be_host be_http_port
+        be_host=$(echo "${line}" | awk -F'\t' -v c="${host_col}" '{print $c}')
+        be_http_port=$(echo "${line}" | awk -F'\t' -v c="${http_port_col}" '{print $c}')
+        if [[ -n "${be_host}" && -n "${be_http_port}" && "${be_http_port}" =~ ^[0-9]+$ ]]; then
+            DORIS_BE_TARGETS+=("${be_host}:${be_http_port}")
+            log_info "  发现 BE: ${be_host}:${be_http_port}"
+        fi
+    done <<< "${be_output}"
+
+    if [[ ${#DORIS_BE_TARGETS[@]} -eq 0 ]]; then
+        log_error "未发现任何 Doris BE 节点"
+        exit 1
+    fi
+
+    echo ""
+    log_info "Doris 集群发现完成: ${#DORIS_FE_TARGETS[@]} FE + ${#DORIS_BE_TARGETS[@]} BE ✓"
+}
+
+########################################
 # Step 1: 下载二进制包
 ########################################
 download_packages() {
@@ -319,31 +485,71 @@ deploy_node_exporter() {
     done
 
     # --- 先部署远程3台 (83/84/85) ---
-    log_info "分发 Node Exporter 到远程机器..."
+    # 幂等检查: 检查远程机器上 node_exporter 是否已安装且版本匹配
+    local remote_needs_deploy=()
+    local remote_skip=()
 
-    # 先在远程机器上创建目录
-    parallel_exec "${hosts_file}" "mkdir -p ${REMOTE_BASE_DIR}/node_exporter"
+    for host in "${NODE_EXPORTER_HOSTS[@]}"; do
+        if [[ ${FORCE_DEPLOY} -eq 1 ]]; then
+            remote_needs_deploy+=("${host}")
+            continue
+        fi
+        # 检查远程 binary 是否存在并且版本匹配
+        local remote_version=""
+        remote_version=$(ssh ${SSH_OPTS} "${SSH_USER}@${host}" \
+            "${REMOTE_BASE_DIR}/node_exporter/node_exporter --version 2>&1 | head -1" 2>/dev/null || true)
+        if echo "${remote_version}" | grep -q "version ${NODE_EXPORTER_VERSION}"; then
+            remote_skip+=("${host}")
+        else
+            remote_needs_deploy+=("${host}")
+        fi
+    done
 
-    # 分发包
-    if check_cmd pscp.pssh; then
-        parallel_copy "${hosts_file}" "${PACKAGES_DIR}/${NODE_EXPORTER_PKG}" "${REMOTE_BASE_DIR}/"
-    else
-        for host in "${NODE_EXPORTER_HOSTS[@]}"; do
-            log_info "  scp -> ${host}..."
-            remote_copy "${PACKAGES_DIR}/${NODE_EXPORTER_PKG}" "${host}" "${REMOTE_BASE_DIR}/"
+    if [[ ${#remote_skip[@]} -gt 0 ]]; then
+        log_info "以下远程机器已安装 Node Exporter v${NODE_EXPORTER_VERSION}, 跳过部署:"
+        for h in "${remote_skip[@]}"; do
+            log_info "  ✓ ${h} (已是最新版本)"
         done
     fi
 
-    # 远程解压并安装
-    log_info "远程解压并安装 Node Exporter..."
-    parallel_exec "${hosts_file}" "
-        cd ${REMOTE_BASE_DIR} && \
-        tar xzf ${NODE_EXPORTER_PKG} && \
-        cp -f ${NODE_EXPORTER_DIR}/node_exporter ${REMOTE_BASE_DIR}/node_exporter/ && \
-        rm -rf ${NODE_EXPORTER_DIR} ${NODE_EXPORTER_PKG}
-    "
+    if [[ ${#remote_needs_deploy[@]} -gt 0 ]]; then
+        # 重新生成只包含需要部署的机器的 hosts 文件
+        local deploy_hosts_file
+        deploy_hosts_file=$(mktemp /tmp/ne_deploy_hosts.XXXXXX)
+        for host in "${remote_needs_deploy[@]}"; do
+            echo "${host}" >> "${deploy_hosts_file}"
+        done
 
-    # 远程创建 systemd 服务
+        log_info "分发 Node Exporter 到远程机器: ${remote_needs_deploy[*]}..."
+
+        # 先在远程机器上创建目录
+        parallel_exec "${deploy_hosts_file}" "mkdir -p ${REMOTE_BASE_DIR}/node_exporter"
+
+        # 分发包
+        if check_cmd pscp.pssh; then
+            parallel_copy "${deploy_hosts_file}" "${PACKAGES_DIR}/${NODE_EXPORTER_PKG}" "${REMOTE_BASE_DIR}/"
+        else
+            for host in "${remote_needs_deploy[@]}"; do
+                log_info "  scp -> ${host}..."
+                remote_copy "${PACKAGES_DIR}/${NODE_EXPORTER_PKG}" "${host}" "${REMOTE_BASE_DIR}/"
+            done
+        fi
+
+        # 远程解压并安装
+        log_info "远程解压并安装 Node Exporter..."
+        parallel_exec "${deploy_hosts_file}" "
+            cd ${REMOTE_BASE_DIR} && \
+            tar xzf ${NODE_EXPORTER_PKG} && \
+            cp -f ${NODE_EXPORTER_DIR}/node_exporter ${REMOTE_BASE_DIR}/node_exporter/ && \
+            rm -rf ${NODE_EXPORTER_DIR} ${NODE_EXPORTER_PKG}
+        "
+
+        rm -f "${deploy_hosts_file}"
+    else
+        log_info "所有远程机器已安装 Node Exporter v${NODE_EXPORTER_VERSION}, 跳过分发"
+    fi
+
+    # 远程创建 systemd 服务 (对所有远程机器 - 确保配置一致, systemd 操作天然幂等)
     log_info "配置远程机器 Node Exporter systemd 服务..."
     parallel_exec "${hosts_file}" "
 cat > /etc/systemd/system/node_exporter.service << 'UNIT_EOF'
@@ -372,15 +578,28 @@ systemctl restart node_exporter
 "
 
     # --- 再部署本地 74 ---
-    log_info "部署 Node Exporter 到本机 (${MONITOR_HOST})..."
-    mkdir -p "${MONITOR_BASE_DIR}/node_exporter"
-    cd "${MONITOR_BASE_DIR}"
-    tar xzf "${OLDPWD}/${PACKAGES_DIR}/${NODE_EXPORTER_PKG}"
-    cp -f "${NODE_EXPORTER_DIR}/node_exporter" "${MONITOR_BASE_DIR}/node_exporter/"
-    rm -rf "${NODE_EXPORTER_DIR}"
-    cd "${OLDPWD}"
+    # 幂等检查: 检查本机 node_exporter 是否已安装且版本匹配
+    local local_ne_needs_deploy=1
+    if [[ ${FORCE_DEPLOY} -eq 0 ]]; then
+        local local_ne_version=""
+        local_ne_version=$("${MONITOR_BASE_DIR}/node_exporter/node_exporter" --version 2>&1 | head -1 || true)
+        if echo "${local_ne_version}" | grep -q "version ${NODE_EXPORTER_VERSION}"; then
+            log_info "本机已安装 Node Exporter v${NODE_EXPORTER_VERSION}, 跳过二进制部署"
+            local_ne_needs_deploy=0
+        fi
+    fi
 
-    # 本机 systemd 服务
+    if [[ ${local_ne_needs_deploy} -eq 1 ]]; then
+        log_info "部署 Node Exporter 到本机 (${MONITOR_HOST})..."
+        mkdir -p "${MONITOR_BASE_DIR}/node_exporter"
+        cd "${MONITOR_BASE_DIR}"
+        tar xzf "${OLDPWD}/${PACKAGES_DIR}/${NODE_EXPORTER_PKG}"
+        cp -f "${NODE_EXPORTER_DIR}/node_exporter" "${MONITOR_BASE_DIR}/node_exporter/"
+        rm -rf "${NODE_EXPORTER_DIR}"
+        cd "${OLDPWD}"
+    fi
+
+    # 本机 systemd 服务 (始终更新配置, systemd 操作幂等)
     cat > /etc/systemd/system/node_exporter.service << UNIT_EOF
 [Unit]
 Description=Prometheus Node Exporter
@@ -430,18 +649,32 @@ deploy_prometheus() {
     local PROM_HOME="${MONITOR_BASE_DIR}/prometheus"
     local PROM_DATA="${PROM_HOME}/data"
 
-    # 解压安装
-    log_info "解压 Prometheus..."
+    # 幂等检查: 检查 Prometheus 二进制是否已安装且版本匹配
+    local prom_needs_extract=1
+    if [[ ${FORCE_DEPLOY} -eq 0 ]] && [[ -x "${PROM_HOME}/prometheus" ]]; then
+        local prom_version=""
+        prom_version=$("${PROM_HOME}/prometheus" --version 2>&1 | head -1 || true)
+        if echo "${prom_version}" | grep -q "version ${PROMETHEUS_VERSION}"; then
+            log_info "Prometheus v${PROMETHEUS_VERSION} 已安装, 跳过二进制解压"
+            prom_needs_extract=0
+        fi
+    fi
+
     mkdir -p "${PROM_HOME}" "${PROM_DATA}"
-    cd "${MONITOR_BASE_DIR}"
-    tar xzf "${OLDPWD}/${PACKAGES_DIR}/${PROMETHEUS_PKG}"
-    cp -f "${PROMETHEUS_DIR}/prometheus" "${PROM_HOME}/"
-    cp -f "${PROMETHEUS_DIR}/promtool" "${PROM_HOME}/"
-    # 保留 console 模板
-    cp -rf "${PROMETHEUS_DIR}/consoles" "${PROM_HOME}/" 2>/dev/null || true
-    cp -rf "${PROMETHEUS_DIR}/console_libraries" "${PROM_HOME}/" 2>/dev/null || true
-    rm -rf "${PROMETHEUS_DIR}"
-    cd "${OLDPWD}"
+
+    if [[ ${prom_needs_extract} -eq 1 ]]; then
+        # 解压安装
+        log_info "解压 Prometheus..."
+        cd "${MONITOR_BASE_DIR}"
+        tar xzf "${OLDPWD}/${PACKAGES_DIR}/${PROMETHEUS_PKG}"
+        cp -f "${PROMETHEUS_DIR}/prometheus" "${PROM_HOME}/"
+        cp -f "${PROMETHEUS_DIR}/promtool" "${PROM_HOME}/"
+        # 保留 console 模板
+        cp -rf "${PROMETHEUS_DIR}/consoles" "${PROM_HOME}/" 2>/dev/null || true
+        cp -rf "${PROMETHEUS_DIR}/console_libraries" "${PROM_HOME}/" 2>/dev/null || true
+        rm -rf "${PROMETHEUS_DIR}"
+        cd "${OLDPWD}"
+    fi
 
     # 生成 targets 列表
     local targets=""
@@ -450,6 +683,24 @@ deploy_prometheus() {
             targets="${targets}, "
         fi
         targets="${targets}'${host}:${NODE_EXPORTER_PORT}'"
+    done
+
+    # 生成 Doris FE targets 列表
+    local doris_fe_targets=""
+    for t in "${DORIS_FE_TARGETS[@]}"; do
+        if [[ -n "${doris_fe_targets}" ]]; then
+            doris_fe_targets="${doris_fe_targets}, "
+        fi
+        doris_fe_targets="${doris_fe_targets}'${t}'"
+    done
+
+    # 生成 Doris BE targets 列表
+    local doris_be_targets=""
+    for t in "${DORIS_BE_TARGETS[@]}"; do
+        if [[ -n "${doris_be_targets}" ]]; then
+            doris_be_targets="${doris_be_targets}, "
+        fi
+        doris_be_targets="${doris_be_targets}'${t}'"
     done
 
     # 写入 prometheus.yml 配置
@@ -485,6 +736,17 @@ scrape_configs:
   - job_name: "node_exporter"
     static_configs:
       - targets: [${targets}]
+
+  # Apache Doris 集群监控
+  - job_name: "doris_cluster"
+    metrics_path: "/metrics"
+    static_configs:
+      - targets: [${doris_fe_targets}]
+        labels:
+          group: fe
+      - targets: [${doris_be_targets}]
+        labels:
+          group: be
 PROM_EOF
 
     # 检查配置文件语法
@@ -555,40 +817,58 @@ deploy_grafana() {
     local GRAFANA_HOME="${MONITOR_BASE_DIR}/grafana"
     local GRAFANA_DATA="${GRAFANA_HOME}/data"
 
-    # 解压安装
-    log_info "解压 Grafana..."
-    mkdir -p "${GRAFANA_HOME}"
-    cd "${MONITOR_BASE_DIR}"
-    tar xzf "${OLDPWD}/${PACKAGES_DIR}/${GRAFANA_PKG}"
-
-    # Grafana OSS 解压后目录名可能是 grafana-v11.4.0 或 grafana-11.4.0
-    local grafana_extracted=""
-    for d in grafana-v${GRAFANA_VERSION} grafana-${GRAFANA_VERSION} grafana; do
-        if [[ -d "${d}" ]]; then
-            grafana_extracted="${d}"
-            break
+    # 幂等检查: 检查 Grafana 二进制是否已安装且版本匹配
+    local grafana_needs_extract=1
+    if [[ ${FORCE_DEPLOY} -eq 0 ]] && [[ -x "${GRAFANA_HOME}/bin/grafana" || -x "${GRAFANA_HOME}/bin/grafana-server" ]]; then
+        local grafana_version=""
+        if [[ -x "${GRAFANA_HOME}/bin/grafana" ]]; then
+            grafana_version=$("${GRAFANA_HOME}/bin/grafana" server -v 2>&1 || true)
+        elif [[ -x "${GRAFANA_HOME}/bin/grafana-server" ]]; then
+            grafana_version=$("${GRAFANA_HOME}/bin/grafana-server" -v 2>&1 || true)
         fi
-    done
-
-    if [[ -z "${grafana_extracted}" ]]; then
-        # 尝试找以 grafana 开头的目录
-        grafana_extracted=$(ls -d grafana* 2>/dev/null | head -1)
+        if echo "${grafana_version}" | grep -q "${GRAFANA_VERSION}"; then
+            log_info "Grafana v${GRAFANA_VERSION} 已安装, 跳过二进制解压"
+            grafana_needs_extract=0
+        fi
     fi
 
-    if [[ -z "${grafana_extracted}" || ! -d "${grafana_extracted}" ]]; then
-        log_error "无法找到 Grafana 解压目录, 请检查包文件"
-        ls -la
-        exit 1
-    fi
+    mkdir -p "${GRAFANA_HOME}"
 
-    log_info "  Grafana 解压目录: ${grafana_extracted}"
+    if [[ ${grafana_needs_extract} -eq 1 ]]; then
+        # 解压安装
+        log_info "解压 Grafana..."
+        cd "${MONITOR_BASE_DIR}"
+        tar xzf "${OLDPWD}/${PACKAGES_DIR}/${GRAFANA_PKG}"
 
-    # 移动文件到目标目录
-    if [[ "${grafana_extracted}" != "grafana" || "$(realpath ${grafana_extracted})" != "$(realpath ${GRAFANA_HOME})" ]]; then
-        cp -rf "${grafana_extracted}"/* "${GRAFANA_HOME}/"
-        rm -rf "${grafana_extracted}"
+        # Grafana OSS 解压后目录名可能是 grafana-v11.4.0 或 grafana-11.4.0
+        local grafana_extracted=""
+        for d in grafana-v${GRAFANA_VERSION} grafana-${GRAFANA_VERSION} grafana; do
+            if [[ -d "${d}" ]]; then
+                grafana_extracted="${d}"
+                break
+            fi
+        done
+
+        if [[ -z "${grafana_extracted}" ]]; then
+            # 尝试找以 grafana 开头的目录
+            grafana_extracted=$(ls -d grafana* 2>/dev/null | head -1)
+        fi
+
+        if [[ -z "${grafana_extracted}" || ! -d "${grafana_extracted}" ]]; then
+            log_error "无法找到 Grafana 解压目录, 请检查包文件"
+            ls -la
+            exit 1
+        fi
+
+        log_info "  Grafana 解压目录: ${grafana_extracted}"
+
+        # 移动文件到目标目录
+        if [[ "${grafana_extracted}" != "grafana" || "$(realpath ${grafana_extracted})" != "$(realpath ${GRAFANA_HOME})" ]]; then
+            cp -rf "${grafana_extracted}"/* "${GRAFANA_HOME}/"
+            rm -rf "${grafana_extracted}"
+        fi
+        cd "${OLDPWD}"
     fi
-    cd "${OLDPWD}"
 
     # 创建数据目录
     mkdir -p "${GRAFANA_DATA}" "${GRAFANA_DATA}/plugins" "${GRAFANA_DATA}/log" "${GRAFANA_HOME}/provisioning/datasources" "${GRAFANA_HOME}/provisioning/dashboards"
@@ -721,7 +1001,7 @@ UNIT_EOF
 # Step 5: 导入 Grafana Dashboard
 ########################################
 import_dashboard() {
-    log_step "Step 5: 导入 Node Exporter Dashboard"
+    log_step "Step 5: 导入 Grafana Dashboard"
 
     local GRAFANA_URL="http://localhost:${GRAFANA_PORT}"
     local GRAFANA_AUTH="admin:admin"
@@ -768,6 +1048,20 @@ import_dashboard() {
     local dashboard_file="${DASHBOARD_JSON_DIR}/node-exporter-full.json"
     local dashboard_tmp="${DASHBOARD_JSON_DIR}/.node-exporter-full.tmp.json"
 
+    # 幂等检查: 如果 dashboard JSON 已存在且非空, 跳过下载
+    if [[ ${FORCE_DEPLOY} -eq 0 ]] && [[ -s "${dashboard_file}" ]]; then
+        local existing_size
+        existing_size=$(stat -c%s "${dashboard_file}" 2>/dev/null || echo 0)
+        if [[ ${existing_size} -gt 1000 ]]; then
+            log_info "  Node Exporter Dashboard JSON 已存在 ($(numfmt --to=iec ${existing_size})), 跳过下载"
+        else
+            # 文件太小, 可能是损坏的, 重新下载
+            log_warn "  Dashboard 文件过小, 将重新下载"
+            rm -f "${dashboard_file}"
+        fi
+    fi
+
+    if [[ ! -s "${dashboard_file}" ]] || [[ ${FORCE_DEPLOY} -eq 1 ]]; then
     # 尝试从 Grafana.com API 下载 dashboard JSON 到文件
     local download_ok=0
     if curl -sf --connect-timeout 15 --max-time 60 \
@@ -830,10 +1124,7 @@ with open('${dashboard_file}', 'w') as f:
 
         log_info "  Dashboard 已写入 provisioning 目录"
 
-        # 重启 Grafana 使 provisioning 生效
-        systemctl restart grafana
-        sleep 3
-        log_info "  ✓ Dashboard 已通过 provisioning 导入"
+        log_info "  ✓ Node Exporter Dashboard 准备就绪"
     else
         rm -f "${dashboard_tmp}"
         log_warn "  无法从 grafana.com 下载 Dashboard"
@@ -928,10 +1219,99 @@ with open('${dashboard_file}', 'w') as f:
 }
 BASIC_DASH_EOF
 
-        systemctl restart grafana
-        sleep 3
-        log_info "  ✓ 简化版 Dashboard 已导入"
+        log_info "  ✓ 简化版 Dashboard 准备就绪"
     fi
+
+    fi  # 结束 Node Exporter Dashboard 幂等检查
+
+    # --- Doris Overview Dashboard (ID: 9734) ---
+    log_info ""
+    log_info "下载 Doris Overview Dashboard (ID: 9734)..."
+    local doris_dashboard_file="${DASHBOARD_JSON_DIR}/doris-overview.json"
+    local doris_dashboard_tmp="${DASHBOARD_JSON_DIR}/.doris-overview.tmp.json"
+
+    # 幂等检查: 如果 Doris Dashboard JSON 已存在且非空, 跳过下载
+    local doris_dash_skip=0
+    if [[ ${FORCE_DEPLOY} -eq 0 ]] && [[ -s "${doris_dashboard_file}" ]]; then
+        local doris_existing_size
+        doris_existing_size=$(stat -c%s "${doris_dashboard_file}" 2>/dev/null || echo 0)
+        if [[ ${doris_existing_size} -gt 1000 ]]; then
+            log_info "  Doris Dashboard JSON 已存在 ($(numfmt --to=iec ${doris_existing_size})), 跳过下载"
+            doris_dash_skip=1
+        fi
+    fi
+
+    if [[ ${doris_dash_skip} -eq 0 ]]; then
+    local doris_download_ok=0
+    if curl -sf --connect-timeout 15 --max-time 60 \
+        -o "${doris_dashboard_tmp}" \
+        "https://grafana.com/api/dashboards/9734/revisions/5/download" 2>/dev/null; then
+        if [[ -s "${doris_dashboard_tmp}" ]] && head -1 "${doris_dashboard_tmp}" | grep -q '{'; then
+            local doris_fsize
+            doris_fsize=$(stat -c%s "${doris_dashboard_tmp}" 2>/dev/null || echo 0)
+            if [[ ${doris_fsize} -gt 1000 ]]; then
+                doris_download_ok=1
+            fi
+        fi
+    fi
+
+    if [[ ${doris_download_ok} -eq 1 ]]; then
+        log_info "  Doris Dashboard JSON 下载成功"
+
+        if check_cmd python3; then
+            python3 -c "
+import json
+
+with open('${doris_dashboard_tmp}', 'r') as f:
+    dashboard = json.load(f)
+
+def fix_datasource(obj):
+    if isinstance(obj, dict):
+        if 'datasource' in obj:
+            ds = obj['datasource']
+            if isinstance(ds, str):
+                obj['datasource'] = {'type': 'prometheus', 'uid': ''}
+            elif isinstance(ds, dict):
+                ds.setdefault('type', 'prometheus')
+        for v in obj.values():
+            fix_datasource(v)
+    elif isinstance(obj, list):
+        for item in obj:
+            fix_datasource(item)
+
+fix_datasource(dashboard)
+dashboard['id'] = None
+dashboard['uid'] = 'doris-overview'
+dashboard['title'] = 'Doris Overview'
+
+with open('${doris_dashboard_file}', 'w') as f:
+    json.dump(dashboard, f, indent=2)
+" 2>/dev/null || cp -f "${doris_dashboard_tmp}" "${doris_dashboard_file}"
+        else
+            cp -f "${doris_dashboard_tmp}" "${doris_dashboard_file}"
+        fi
+
+        rm -f "${doris_dashboard_tmp}"
+
+        if [[ ! -s "${doris_dashboard_file}" ]]; then
+            log_warn "  Python 处理失败, 使用原始 JSON"
+            cp -f "${doris_dashboard_tmp}" "${doris_dashboard_file}" 2>/dev/null || true
+        fi
+
+        log_info "  Doris Dashboard 已写入 provisioning 目录"
+    else
+        rm -f "${doris_dashboard_tmp}"
+        log_warn "  无法从 grafana.com 下载 Doris Dashboard"
+        log_warn "  请在 Grafana UI 中手动导入: Dashboards -> Import -> 输入 ID: 9734"
+    fi
+
+    fi  # 结束 Doris Dashboard 幂等检查
+
+    # 最终重启 Grafana 使所有 Dashboard provisioning 生效
+    log_info "重启 Grafana 加载所有 Dashboard..."
+    systemctl restart grafana
+    sleep 3
+    log_info "Dashboard 导入完成 ✓"
 }
 
 ########################################
@@ -952,6 +1332,29 @@ final_verify() {
             metrics_ok="✓"
         fi
         printf "  %-18s http://%s:%s/metrics  [%s]\n" "${host}" "${host}" "${NODE_EXPORTER_PORT}" "${metrics_ok}"
+    done
+
+    echo ""
+
+    # Doris FE/BE 状态
+    log_info "--- Doris FE ---"
+    for target in "${DORIS_FE_TARGETS[@]}"; do
+        local fe_ok="✗"
+        if curl -sf --connect-timeout 5 "http://${target}/metrics" > /dev/null 2>&1; then
+            fe_ok="✓"
+        fi
+        printf "  %-18s http://%s/metrics     [%s]\n" "${target}" "${target}" "${fe_ok}"
+    done
+
+    echo ""
+
+    log_info "--- Doris BE ---"
+    for target in "${DORIS_BE_TARGETS[@]}"; do
+        local be_ok="✗"
+        if curl -sf --connect-timeout 5 "http://${target}/metrics" > /dev/null 2>&1; then
+            be_ok="✓"
+        fi
+        printf "  %-18s http://%s/metrics     [%s]\n" "${target}" "${target}" "${be_ok}"
     done
 
     echo ""
@@ -1024,12 +1427,16 @@ main() {
     log_info "部署时间: $(date '+%Y-%m-%d %H:%M:%S')"
     log_info "执行用户: $(whoami)"
     log_info "执行机器: $(hostname) (${MONITOR_HOST})"
+    if [[ ${FORCE_DEPLOY} -eq 1 ]]; then
+        log_warn "强制模式已启用 (--force), 将跳过所有幂等检查"
+    fi
 
     # 记录脚本所在目录
     SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
     cd "${SCRIPT_DIR}"
 
     preflight_check
+    discover_doris_cluster
     download_packages
     deploy_node_exporter
     deploy_prometheus
