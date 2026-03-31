@@ -40,7 +40,7 @@ warnings.filterwarnings("ignore")
 
 # ─── Configuration ───────────────────────────────────────────────
 DORIS_HOST = "127.0.0.1"
-DORIS_PORT = 9930
+DORIS_PORT = 9030
 DORIS_USER = "root"
 DORIS_PASS = ""
 DORIS_DB   = "test_demo"

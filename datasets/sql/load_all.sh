@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # ============================================================
 # 批量 Stream Load + ETL 导入脚本
-# 用法: bash load_all.sh <fe_host> <http_port> <query_port> <db> <user> [password]
-# 示例: bash load_all.sh 127.0.0.1 8930 9930 test_demo root
+# 用法: bash load_all.sh [fe_host] [http_port] [query_port] [db] [user] [password]
+# 示例: bash load_all.sh 127.0.0.1 8030 9030 test_demo root
 #
 # 流程:
 #   Step 0: 创建数据库
@@ -25,11 +25,11 @@
 
 set -euo pipefail
 
-FE_HOST="${1:?用法: $0 <fe_host> <http_port> <query_port> <db> <user> [password]}"
-HTTP_PORT="${2:?缺少 http_port (Stream Load 用)}"
-QUERY_PORT="${3:?缺少 query_port (MySQL 协议端口)}"
-DB="${4:?缺少数据库名}"
-USER="${5:?缺少用户名}"
+FE_HOST="${1:-127.0.0.1}"
+HTTP_PORT="${2:-8030}"
+QUERY_PORT="${3:-9030}"
+DB="${4:-test_demo}"
+USER="${5:-root}"
 PASSWORD="${6:-}"
 PARALLEL="${PARALLEL:-4}"
 
