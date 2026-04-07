@@ -51,32 +51,91 @@ TABLES_128D = {
     "50w":  "sift_user_50w",
     "100w": "sift_user_100w",
 }
+TABLES_128D_PQ = {
+    "1w":   "sift_user_1w_pq",
+    "10w":  "sift_user_10w_pq",
+    "50w":  "sift_user_50w_pq",
+    "100w": "sift_user_100w_pq",
+}
 TABLES_768D = {
     "1w":   "cohere_user_1w",
     "10w":  "cohere_user_10w",
     "50w":  "cohere_user_50w",
     "100w": "cohere_user_100w",
 }
+TABLES_768D_PQ = {
+    "1w":   "cohere_user_1w_pq",
+    "10w":  "cohere_user_10w_pq",
+    "50w":  "cohere_user_50w_pq",
+    "100w": "cohere_user_100w_pq",
+}
 
-# Per-dimension defaults: (tables, default_dist_fn, order_dir, query_source_table)
-DIM_CONFIG = {
+DIM_BASE_CONFIG = {
     128: {
-        "tables":       TABLES_128D,
-        "dist_fn":      "l2_distance",
-        "order":        "ASC",
-        "query_table":  "sift_user_1w",
-        "label":        "128D (SIFT)",
-        "suffix":       "128d",
+        "label":      "128D (SIFT)",
+        "base_suffix": "128d",
+        "metric":     "l2_distance",
+        "order":      "ASC",
+        "tables": {
+            "bruteforce": TABLES_128D,
+            "pq_on_disk": TABLES_128D_PQ,
+        },
+        "query_table": {
+            "bruteforce": "sift_user_1w",
+            "pq_on_disk": "sift_user_1w_pq",
+        },
+        "distfn_functions": {
+            "bruteforce": {
+                "l2_distance":   ("ASC", "l2_distance(embedding, {vec})"),
+                "inner_product": ("DESC", "inner_product(embedding, {vec})"),
+            },
+            "pq_on_disk": {
+                "l2_distance_approximate": ("ASC", "l2_distance_approximate(embedding, {vec})"),
+            },
+        },
     },
     768: {
-        "tables":       TABLES_768D,
-        "dist_fn":      "l2_distance",
-        "order":        "ASC",
-        "query_table":  "cohere_user_1w",
-        "label":        "768D (Cohere)",
-        "suffix":       "768d",
+        "label":      "768D (Cohere)",
+        "base_suffix": "768d",
+        "metric":     "inner_product",
+        "order":      "DESC",
+        "tables": {
+            "bruteforce": TABLES_768D,
+            "pq_on_disk": TABLES_768D_PQ,
+        },
+        "query_table": {
+            "bruteforce": "cohere_user_1w",
+            "pq_on_disk": "cohere_user_1w_pq",
+        },
+        "distfn_functions": {
+            "bruteforce": {
+                "l2_distance":   ("ASC", "l2_distance(embedding, {vec})"),
+                "inner_product": ("DESC", "inner_product(embedding, {vec})"),
+            },
+            "pq_on_disk": {
+                "inner_product_approximate": ("DESC", "inner_product_approximate(embedding, {vec})"),
+            },
+        },
     },
 }
+
+
+def resolve_dim_conf(dim, search_mode):
+    base = DIM_BASE_CONFIG[dim]
+    metric = base["metric"]
+    dist_fn = metric if search_mode == "bruteforce" else f"{metric}_approximate"
+    suffix = base["base_suffix"] if search_mode == "bruteforce" else f"{base['base_suffix']}_{search_mode}"
+    return {
+        "tables": base["tables"][search_mode],
+        "dist_fn": dist_fn,
+        "order": base["order"],
+        "query_table": base["query_table"][search_mode],
+        "label": base["label"],
+        "suffix": suffix,
+        "search_mode": search_mode,
+        "metric": metric,
+        "distfn_functions": base["distfn_functions"][search_mode],
+    }
 
 # Back-compat: default TABLES alias (overridden at runtime)
 TABLES = TABLES_128D
@@ -217,6 +276,7 @@ def test_scale(conn, query_vecs, dim_conf):
         stats["table"] = table
         stats["scale"] = label
         stats["dist_fn"] = dist_fn
+        stats["search_mode"] = dim_conf["search_mode"]
         results.append(stats)
         print(f"  avg={stats['avg_ms']:.1f}ms  p50={stats['p50_ms']:.1f}ms  p99={stats['p99_ms']:.1f}ms")
 
@@ -246,6 +306,7 @@ def test_topk(conn, query_vecs, dim_conf, table_key="10w"):
         stats["table"] = table
         stats["limit_k"] = k
         stats["dist_fn"] = dist_fn
+        stats["search_mode"] = dim_conf["search_mode"]
         results.append(stats)
         print(f"  avg={stats['avg_ms']:.1f}ms  p50={stats['p50_ms']:.1f}ms  p99={stats['p99_ms']:.1f}ms")
 
@@ -284,6 +345,7 @@ def test_filter(conn, query_vecs, dim_conf, table_key="10w"):
         stats["table"] = table
         stats["n_users"] = n_users
         stats["dist_fn"] = dist_fn
+        stats["search_mode"] = dim_conf["search_mode"]
         results.append(stats)
         print(f"  avg={stats['avg_ms']:.1f}ms  p50={stats['p50_ms']:.1f}ms  p99={stats['p99_ms']:.1f}ms")
 
@@ -293,15 +355,11 @@ def test_filter(conn, query_vecs, dim_conf, table_key="10w"):
 def test_distance_fn(conn, query_vecs, dim_conf, table_key="10w"):
     """Scenario 4: Compare different distance/similarity functions."""
     table = dim_conf["tables"][table_key]
-    functions = {
-        "l2_distance":       ("ASC",  "l2_distance(embedding, {vec})"),
-        "inner_product":     ("DESC", "inner_product(embedding, {vec})"),
-        "cosine_similarity": ("DESC", "cosine_similarity(embedding, {vec})"),
-    }
+    functions = dim_conf["distfn_functions"]
 
     print(f"\n{'=' * 60}")
     print(f"Scenario 4: Distance Function Test [{dim_conf['label']}] on {table} (user_id=42, LIMIT 10)")
-    print(f"  Comparing l2_distance / inner_product / cosine_similarity")
+    print(f"  Comparing: {' / '.join(functions.keys())}")
     print(f"{'=' * 60}")
 
     results = []
@@ -314,6 +372,7 @@ def test_distance_fn(conn, query_vecs, dim_conf, table_key="10w"):
         stats = run_bench(conn, sql, query_vecs)
         stats["table"] = table
         stats["function"] = fn_name
+        stats["search_mode"] = dim_conf["search_mode"]
         results.append(stats)
         print(f"  avg={stats['avg_ms']:.1f}ms  p50={stats['p50_ms']:.1f}ms  p99={stats['p99_ms']:.1f}ms")
 
@@ -382,6 +441,7 @@ def test_concurrency(query_vecs, dim_conf, table_key="10w", concurrency_levels=N
             "concurrency":  c_level,
             "table":        table,
             "dist_fn":      dist_fn,
+            "search_mode":  dim_conf["search_mode"],
             "total_queries": total_queries,
             "wall_time_s":  round(wall_time, 2),
             "qps":          round(qps, 1),
@@ -419,6 +479,7 @@ def test_large_topk(conn, query_vecs, dim_conf, table_key="10w"):
         stats["table"] = table
         stats["limit_k"] = k
         stats["dist_fn"] = dist_fn
+        stats["search_mode"] = dim_conf["search_mode"]
         results.append(stats)
         print(f"  avg={stats['avg_ms']:.1f}ms  p50={stats['p50_ms']:.1f}ms  p99={stats['p99_ms']:.1f}ms")
 
@@ -446,6 +507,7 @@ def test_full_scan(conn, query_vecs, dim_conf):
         stats["table"] = table
         stats["scale"] = label
         stats["dist_fn"] = dist_fn
+        stats["search_mode"] = dim_conf["search_mode"]
         results.append(stats)
         print(f"  avg={stats['avg_ms']:.1f}ms  p50={stats['p50_ms']:.1f}ms  p99={stats['p99_ms']:.1f}ms")
 
@@ -484,6 +546,8 @@ def test_cache_effect(conn, query_vecs, dim_conf, table_key="10w"):
             "iteration_start": start + 1,
             "iteration_end": min(start + window, total_iterations),
             "table": table,
+            "dist_fn": dist_fn,
+            "search_mode": dim_conf["search_mode"],
             "avg_ms": round(np.mean(chunk), 2),
             "min_ms": round(min(chunk), 2),
             "max_ms": round(max(chunk), 2),
@@ -498,6 +562,8 @@ def test_cache_effect(conn, query_vecs, dim_conf, table_key="10w"):
         "iteration": list(range(1, total_iterations + 1)),
         "latency_ms": [round(x, 2) for x in latencies],
         "table": table,
+        "dist_fn": dist_fn,
+        "search_mode": dim_conf["search_mode"],
     })
     return pd.DataFrame(results), raw_df
 
@@ -593,6 +659,7 @@ def test_concurrent_scale(query_vecs, dim_conf, concurrency_levels=None, duratio
                 "concurrency":   c_level,
                 "limit":         limit,
                 "dist_fn":       dist_fn,
+                "search_mode":   dim_conf["search_mode"],
                 "duration_s":    duration,
                 "total_queries": total_queries,
                 "wall_time_s":   round(wall_time, 2),
@@ -671,6 +738,7 @@ def test_high_concurrency(query_vecs, dim_conf, table_key="10w", concurrency_lev
             "concurrency":   c_level,
             "table":         table,
             "dist_fn":       dist_fn,
+            "search_mode":   dim_conf["search_mode"],
             "total_queries": total_queries,
             "wall_time_s":   round(wall_time, 2),
             "qps":           round(qps, 1),
@@ -1034,8 +1102,8 @@ def repair_report(report_dir, dim_conf):
     """Repair an existing benchmark report directory.
 
     Fixes:
-      1. JSON summary — adds missing 'dist_fn' (and 'limit' for concscale) fields
-      2. CSV files   — adds missing 'dist_fn' (and 'limit' for concscale) columns
+      1. JSON summary — adds missing 'dist_fn' / 'search_mode' (and 'limit' for concscale) fields
+      2. CSV files   — adds missing 'dist_fn' / 'search_mode' (and 'limit' for concscale) columns
       3. PNG charts  — regenerated from patched data with correct dist_fn in titles
 
     Args:
@@ -1045,6 +1113,7 @@ def repair_report(report_dir, dim_conf):
     import glob as globmod
 
     dist_fn = dim_conf["dist_fn"]
+    search_mode = dim_conf["search_mode"]
 
     print("=" * 60)
     print(f"  Repair Report: {report_dir}")
@@ -1067,6 +1136,9 @@ def repair_report(report_dir, dim_conf):
                     continue
                 if rec.get("dist_fn") != dist_fn:
                     rec["dist_fn"] = dist_fn
+                    changed = True
+                if rec.get("search_mode") != search_mode:
+                    rec["search_mode"] = search_mode
                     changed = True
                 # Add limit for concscale if missing
                 if scenario_name == "concscale" and "limit" not in rec:
@@ -1099,6 +1171,9 @@ def repair_report(report_dir, dim_conf):
 
         if "dist_fn" not in df.columns or (df["dist_fn"] != dist_fn).any():
             df["dist_fn"] = dist_fn
+            patched = True
+        if "search_mode" not in df.columns or (df["search_mode"] != search_mode).any():
+            df["search_mode"] = search_mode
             patched = True
         if scenario_name == "concscale" and "limit" not in df.columns:
             df["limit"] = 10
@@ -1179,6 +1254,8 @@ def main():
     parser.add_argument("--queries", type=int, default=NUM_QUERIES, help="Number of query vectors")
     parser.add_argument("--dim", type=int, default=128, choices=[128, 768],
                         help="Vector dimension: 128 (SIFT) or 768 (Cohere)")
+    parser.add_argument("--search-mode", default="bruteforce", choices=["bruteforce", "pq_on_disk"],
+                        help="Search mode: brute-force scan or pq_on_disk ANN index")
     parser.add_argument("--scenarios", nargs="*", default=None,
                         help="Run specific scenarios:\n"
                              "  scale       - Latency vs data scale\n"
@@ -1216,7 +1293,7 @@ def main():
 
     # ── Repair mode: fix existing report and exit ──
     if args.repair_report:
-        dim_conf = DIM_CONFIG[args.dim]
+        dim_conf = resolve_dim_conf(args.dim, args.search_mode)
         repair_report(args.repair_report, dim_conf)
         return
 
@@ -1234,7 +1311,7 @@ def main():
         SESSION_VARS["parallel_fragment_exec_instance_num"] = args.parallel
         SESSION_VARS["max_scanners_concurrency"] = args.parallel
 
-    dim_conf = DIM_CONFIG[args.dim]
+    dim_conf = resolve_dim_conf(args.dim, args.search_mode)
     TABLES = dim_conf["tables"]
 
     # Filter tables if --tables specified
@@ -1251,7 +1328,7 @@ def main():
     table_key = args.table_key or "10w"
     if table_key not in dim_conf["tables"]:
         # table_key not in filtered set — check if it exists in the full config
-        full_tables = DIM_CONFIG[args.dim]["tables"]
+        full_tables = resolve_dim_conf(args.dim, args.search_mode)["tables"]
         if table_key not in full_tables:
             parser.error(f"Unknown table-key '{table_key}'. "
                          f"Valid: {list(full_tables.keys())}")
@@ -1272,7 +1349,7 @@ def main():
     print("=" * 60)
     print(f"  Doris Vector Search Benchmark [{dim_conf['label']}]")
     print(f"  Host: {DORIS_HOST}:{DORIS_PORT}  DB: {DORIS_DB}")
-    print(f"  Dim: {args.dim}  Dist: {dim_conf['dist_fn']}")
+    print(f"  Dim: {args.dim}  Mode: {args.search_mode}  Dist: {dim_conf['dist_fn']}")
     print(f"  Runs: {BENCH_RUNS}  Query vectors: {NUM_QUERIES}")
     print(f"  Tables: {list(dim_conf['tables'].keys())}  Table-key: {table_key}")
     print(f"  Parallelism: {args.parallel if args.parallel > 0 else 'auto'}")
