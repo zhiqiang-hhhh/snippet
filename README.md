@@ -16,16 +16,9 @@ Key paths used by the benchmark:
 
 - `datasets/source/sift_database.tsv`: default 128D source file
 - `datasets/source_768d/cohere_1m_train.parquet`: default 768D source file
-- `datasets/dataset_1w/`, `datasets/dataset_10w/`, `datasets/dataset_50w/`, `datasets/dataset_100w/`: generated 128D datasets
-- `datasets/dataset_768d_1w/`: generated 768D base dataset
-- `datasets/sql/01_sift_user_1w.sql`
-- `datasets/sql/02_sift_user_10w.sql`
-- `datasets/sql/03_sift_user_50w.sql`
-- `datasets/sql/04_sift_user_100w.sql`
-- `datasets/sql/05_cohere_user_1w.sql`
-- `datasets/sql/06_cohere_user_10w.sql`
-- `datasets/sql/07_cohere_user_50w.sql`
-- `datasets/sql/08_cohere_user_100w.sql`
+- 128D generated datasets for 10K/user, 100K/user, 500K/user, and 1M/user
+- 768D local base dataset for 10K/user
+- SQL DDL files for all 128D / 768D table sizes and PQ variants
 
 Benchmark output goes to `benchmark_results*` directories. `benchmark.py` automatically appends a dimension suffix:
 
@@ -59,10 +52,10 @@ user_id<TAB>id<TAB>[embedding]
 
 Generated scales:
 
-- `1w`: 100 users x 10,000 vectors = 1M rows
-- `10w`: 100 users x 100,000 vectors = 10M rows
-- `50w`: 100 users x 500,000 vectors = 50M rows
-- `100w`: 100 users x 1,000,000 vectors = 100M rows
+- `10K/user`: 100 users x 10,000 vectors = 1M rows
+- `100K/user`: 100 users x 100,000 vectors = 10M rows
+- `500K/user`: 100 users x 500,000 vectors = 50M rows
+- `1M/user`: 100 users x 1,000,000 vectors = 100M rows
 
 Defaults in code:
 
@@ -89,7 +82,7 @@ python3 generate_datasets.py
 Run a single 128D dataset:
 
 ```bash
-python3 generate_datasets.py dataset_10w
+python3 generate_datasets.py <dataset_name>  # for example, the 100K/user dataset
 ```
 
 ### 768D Cohere
@@ -109,8 +102,8 @@ python3 generate_datasets_768d.py
 Behavior:
 
 - If `datasets/source_768d/cohere_1m_train.parquet` is missing, the script tries to download it automatically.
-- The script only generates `dataset_768d_1w/` locally.
-- Larger 768D tables (`10w`, `50w`, `100w`) are expanded inside Doris by `datasets/sql/load_all.sh` via `INSERT INTO ... SELECT`.
+- The script only generates the 10K/user 768D dataset locally.
+- Larger 768D tables (`100K/user`, `500K/user`, `1M/user`) are expanded inside Doris by `datasets/sql/load_all.sh` via `INSERT INTO ... SELECT`.
 
 ## Load Data Into Doris
 
@@ -130,18 +123,29 @@ Useful environment variables:
 
 - `PARALLEL=4`: shard load concurrency, default `4`
 - `SKIP_DDL=1`: skip database/table creation
-- `TABLES="1w 10w"`: only load selected scales
+- `TABLES="10k 100k"`: only load selected scales
 - `DIMS="128d"`: load only 128D tables
 - `DIMS="768d"`: load only 768D tables
 - `DIMS="all"`: load both, default
 - `INDEX_MODE="pq_on_disk"`: create/load PQ-on-disk ANN tables instead of brute-force tables
+- `LOAD_MODE="etl_only"`: default load mode, supports `etl_only`, `stream_only`
+
+Default load behavior:
+
+- `load_all.sh` now uses **ETL as the default mode** for both 128D and 768D
+- In `etl_only` mode, it first stream-loads the 10K/user table as the ETL source table
+- Then it expands `10K/user -> 100K/user -> 500K/user -> 1M/user` inside Doris via `INSERT INTO ... SELECT`
+- Before stream load or ETL, it checks the target table row count
+- If the target table already has the expected row count, that table is skipped automatically
 
 Examples:
 
 ```bash
-PARALLEL=100 DIMS=768d TABLES="1w" bash datasets/sql/load_all.sh
+PARALLEL=100 DIMS=768d TABLES="10k" bash datasets/sql/load_all.sh
 SKIP_DDL=1 DIMS=128d bash datasets/sql/load_all.sh
-INDEX_MODE=pq_on_disk DIMS=768d TABLES="1w" bash datasets/sql/load_all.sh
+INDEX_MODE=pq_on_disk DIMS=768d TABLES="10k" bash datasets/sql/load_all.sh
+LOAD_MODE=etl_only DIMS=128d bash datasets/sql/load_all.sh
+LOAD_MODE=stream_only DIMS=all bash datasets/sql/load_all.sh
 ```
 
 ## Benchmark Scenarios
@@ -158,6 +162,7 @@ INDEX_MODE=pq_on_disk DIMS=768d TABLES="1w" bash datasets/sql/load_all.sh
 - `cache`: repeated same query to observe warming
 - `concscale`: concurrent scale test across multiple tables
 - `highconc`: higher concurrency levels on one table
+- `recall`: in `pq_on_disk` mode, compare approximate search against exact search
 
 If `--scenarios` is omitted, all scenarios run.
 
@@ -181,6 +186,7 @@ If `--scenarios` is omitted, all scenarios run.
 - `--runs`: iterations per test case for latency-style scenarios, default `10`
 - `--queries`: number of query vectors sampled from the smallest table, default `5`
 - `--scenarios ...`: select scenarios to run; omit to run all
+- In `pq_on_disk` mode, `recall` can be run to compare ANN results against exact top-k
 
 ### Parallelism Control
 
@@ -194,10 +200,10 @@ If `--scenarios` is omitted, all scenarios run.
 
 - `--tables SCALE [SCALE ...]`: restrict multi-table scenarios to selected scales
   - affects `scale`, `fullscan`, `concscale`
-  - valid values: `1w`, `10w`, `50w`, `100w`
+  - valid values: `10k`, `100k`, `500k`, `1m`
 - `--table-key SCALE`: choose the table scale for single-table scenarios
   - affects `topk`, `filter`, `distfn`, `concurrency`, `largetopk`, `cache`, `highconc`
-  - default `10w`
+  - default `100k`
 
 ### Concurrent Scale (`concscale`) Specific
 
@@ -221,55 +227,25 @@ Example:
 python3 benchmark.py --dim 768 --repair-report benchmark_results_warm_768d
 ```
 
-## Default Table Mapping
+## Default Scale Mapping
 
 ### 128D
 
-- `1w` -> `sift_user_1w`
-- `10w` -> `sift_user_10w`
-- `50w` -> `sift_user_50w`
-- `100w` -> `sift_user_100w`
-
-PQ table mapping:
-
-- `1w` -> `sift_user_1w_pq`
-- `10w` -> `sift_user_10w_pq`
-- `50w` -> `sift_user_50w_pq`
-- `100w` -> `sift_user_100w_pq`
-
-Default query vector source table:
-
-- brute-force: `sift_user_1w`
-- pq_on_disk: `sift_user_1w_pq`
-
-Default distance function:
-
-- brute-force: `l2_distance` with `ASC`
-- pq_on_disk: `l2_distance_approximate` with `ASC`
+- `10k`: 10,000 vectors per user, 1M rows total
+- `100k`: 100,000 vectors per user, 10M rows total
+- `500k`: 500,000 vectors per user, 50M rows total
+- `1m`: 1,000,000 vectors per user, 100M rows total
+- brute-force uses exact `l2_distance` with `ASC`
+- pq_on_disk uses `l2_distance_approximate` with `ASC`
 
 ### 768D
 
-- `1w` -> `cohere_user_1w`
-- `10w` -> `cohere_user_10w`
-- `50w` -> `cohere_user_50w`
-- `100w` -> `cohere_user_100w`
-
-PQ table mapping:
-
-- `1w` -> `cohere_user_1w_pq`
-- `10w` -> `cohere_user_10w_pq`
-- `50w` -> `cohere_user_50w_pq`
-- `100w` -> `cohere_user_100w_pq`
-
-Default query vector source table:
-
-- brute-force: `cohere_user_1w`
-- pq_on_disk: `cohere_user_1w_pq`
-
-Default distance function:
-
-- brute-force: `inner_product` with `DESC`
-- pq_on_disk: `inner_product_approximate` with `DESC`
+- `10k`: 10,000 vectors per user, 1M rows total
+- `100k`: 100,000 vectors per user, 10M rows total
+- `500k`: 500,000 vectors per user, 50M rows total
+- `1m`: 1,000,000 vectors per user, 100M rows total
+- brute-force uses exact `inner_product` with `DESC`
+- pq_on_disk uses `inner_product_approximate` with `DESC`
 
 PQ index parameters for pq_on_disk tables:
 
@@ -302,6 +278,12 @@ Run all 768D PQ-on-disk benchmarks:
 python3 benchmark.py --dim 768 --search-mode pq_on_disk --parallel 1 --output benchmark_results_warm
 ```
 
+Run only PQ recall evaluation on the 100K/user table:
+
+```bash
+python3 benchmark.py --dim 768 --search-mode pq_on_disk --scenarios recall --table-key 100k --output benchmark_results_warm
+```
+
 Run only concurrent scale on 768D:
 
 ```bash
@@ -326,15 +308,15 @@ Run only a subset of tables for multi-table scenarios:
 
 ```bash
 python3 benchmark.py --dim 768 --scenarios concscale fullscan \
-  --tables 1w 10w \
+  --tables 10k 100k \
   --output benchmark_results_warm
 ```
 
-Run single-table scenarios against `50w`:
+Run single-table scenarios against the 500K/user table:
 
 ```bash
 python3 benchmark.py --dim 768 --scenarios topk cache highconc \
-  --table-key 50w \
+  --table-key 500k \
   --output benchmark_results_warm
 ```
 
@@ -345,6 +327,7 @@ Each benchmark output directory contains:
 - `*.csv`: per-scenario tabular results
 - `summary_<timestamp>.json`: combined JSON summary
 - `*.png`: generated charts
+- In `pq_on_disk` mode, recall output includes `11_recall_test.png`
 
 For `concscale`, current outputs include:
 

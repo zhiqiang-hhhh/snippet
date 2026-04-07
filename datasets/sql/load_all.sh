@@ -7,13 +7,11 @@
 # 流程:
 #   Step 0: 创建数据库
 #   Step 1: 建表 (执行 0*.sql DDL)
-#   Step 2: Stream Load 导入本地数据文件
-#            - 128D: 全部 4 个表 (1w/10w/50w/100w) 直接 stream load
-#            - 768D: 只 stream load cohere_user_1w
-#   Step 3: ETL 扩展 768D 表
-#            - cohere_user_1w  -> cohere_user_10w  (INSERT INTO SELECT x10)
-#            - cohere_user_10w -> cohere_user_50w  (INSERT INTO SELECT x5)
-#            - cohere_user_50w -> cohere_user_100w (INSERT INTO SELECT x2)
+#   Step 2: Stream Load 导入最小表数据文件
+#            - 128D: 只导入 sift_user_1w / sift_user_1w_pq
+#            - 768D: 只导入 cohere_user_1w / cohere_user_1w_pq
+#   Step 3: ETL 扩展到更大规模表
+#            - 1w -> 10w -> 50w -> 100w
 #   Step 4: 验证数据量
 #
 # 可选环境变量:
@@ -22,6 +20,7 @@
 #   TABLES="1w 10w"   只导入指定规模的表 (默认全部)
 #   DIMS="768d"       只导入指定维度: 128d, 768d, all (默认 all)
 #   INDEX_MODE="pq_on_disk"  导入 pq_on_disk ANN 表; 否则导入普通表 (默认 bruteforce)
+#   LOAD_MODE="etl_only"   etl_only / stream_only (默认 etl_only)
 # ============================================================
 
 set -euo pipefail
@@ -34,11 +33,30 @@ USER="${5:-root}"
 PASSWORD="${6:-}"
 PARALLEL="${PARALLEL:-4}"
 INDEX_MODE="${INDEX_MODE:-bruteforce}"
+LOAD_MODE="${LOAD_MODE:-etl_only}"
+
+if [ "$LOAD_MODE" != "etl_only" ] && [ "$LOAD_MODE" != "stream_only" ]; then
+  echo "[ERROR] LOAD_MODE must be 'etl_only' or 'stream_only', got: ${LOAD_MODE}"
+  exit 1
+fi
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 DATA_DIR="$(dirname "$SCRIPT_DIR")"
 
 BASE_URL="http://${FE_HOST}:${HTTP_PORT}/api/${DB}"
+
+table_count() {
+  local table="$1"
+  ${MYSQL_CMD} -D "${DB}" -N -e "SELECT COUNT(*) FROM ${table};" 2>/dev/null || echo "N/A"
+}
+
+table_ready() {
+  local table="$1"
+  local expected="$2"
+  local count
+  count=$(table_count "$table")
+  [ "$count" = "$expected" ]
+}
 
 # 构建 mysql 命令（密码为空时不加 -p）
 if [ -n "$PASSWORD" ]; then
@@ -119,22 +137,19 @@ chmod +x "$LOAD_HELPER"
 # 128D (SIFT) 表映射 — 全部 4 个规模都有本地数据文件
 # --------------------------------------------------
 declare -A TABLE_MAP_128D=(
-  ["1w"]="sift_user_1w"
-  ["10w"]="sift_user_10w"
-  ["50w"]="sift_user_50w"
-  ["100w"]="sift_user_100w"
+  ["10k"]="sift_user_1w"
+  ["100k"]="sift_user_10w"
+  ["500k"]="sift_user_50w"
+  ["1m"]="sift_user_100w"
 )
 declare -A TABLE_MAP_128D_PQ=(
-  ["1w"]="sift_user_1w_pq"
-  ["10w"]="sift_user_10w_pq"
-  ["50w"]="sift_user_50w_pq"
-  ["100w"]="sift_user_100w_pq"
+  ["10k"]="sift_user_1w_pq"
+  ["100k"]="sift_user_10w_pq"
+  ["500k"]="sift_user_50w_pq"
+  ["1m"]="sift_user_100w_pq"
 )
 declare -A DATASET_MAP_128D=(
-  ["1w"]="dataset_1w"
-  ["10w"]="dataset_10w"
-  ["50w"]="dataset_50w"
-  ["100w"]="dataset_100w"
+  ["10k"]="dataset_1w"
 )
 
 # --------------------------------------------------
@@ -142,35 +157,69 @@ declare -A DATASET_MAP_128D=(
 # Stream load 只导入 1w; 10w/50w/100w 由 Step 3 ETL 扩展
 # --------------------------------------------------
 declare -A TABLE_MAP_768D=(
-  ["1w"]="cohere_user_1w"
-  ["10w"]="cohere_user_10w"
-  ["50w"]="cohere_user_50w"
-  ["100w"]="cohere_user_100w"
+  ["10k"]="cohere_user_1w"
+  ["100k"]="cohere_user_10w"
+  ["500k"]="cohere_user_50w"
+  ["1m"]="cohere_user_100w"
 )
 declare -A TABLE_MAP_768D_PQ=(
-  ["1w"]="cohere_user_1w_pq"
-  ["10w"]="cohere_user_10w_pq"
-  ["50w"]="cohere_user_50w_pq"
-  ["100w"]="cohere_user_100w_pq"
+  ["10k"]="cohere_user_1w_pq"
+  ["100k"]="cohere_user_10w_pq"
+  ["500k"]="cohere_user_50w_pq"
+  ["1m"]="cohere_user_100w_pq"
 )
 declare -A DATASET_MAP_768D=(
-  ["1w"]="dataset_768d_1w"
+  ["10k"]="dataset_768d_1w"
 )
 
 # 支持 TABLES 环境变量指定只导入部分规模 (默认全部)
-SCALE_LIST="${TABLES:-1w 10w 50w 100w}"
+SCALE_LIST="${TABLES:-10k 100k 500k 1m}"
 # 支持 DIMS 环境变量指定维度: 128d, 768d, 或 all (默认 all)
 DIMS="${DIMS:-all}"
 
+declare -A EXPECTED_ROWS=(
+  ["10k"]="1000000"
+  ["100k"]="10000000"
+  ["500k"]="50000000"
+  ["1m"]="100000000"
+)
+
+DDL_PAIRS=()
+
 if [ "$INDEX_MODE" = "pq_on_disk" ]; then
-  SQL_FILES=(
-    "${SCRIPT_DIR}"/09_*.sql
-    "${SCRIPT_DIR}"/1[0-6]_*.sql
-  )
+  if [ "$DIMS" = "all" ] || [ "$DIMS" = "128d" ]; then
+    DDL_PAIRS+=(
+      "${SCRIPT_DIR}/09_sift_user_1w_pq.sql:sift_user_1w_pq:10k"
+      "${SCRIPT_DIR}/10_sift_user_10w_pq.sql:sift_user_10w_pq:100k"
+      "${SCRIPT_DIR}/11_sift_user_50w_pq.sql:sift_user_50w_pq:500k"
+      "${SCRIPT_DIR}/12_sift_user_100w_pq.sql:sift_user_100w_pq:1m"
+    )
+  fi
+  if [ "$DIMS" = "all" ] || [ "$DIMS" = "768d" ]; then
+    DDL_PAIRS+=(
+      "${SCRIPT_DIR}/13_cohere_user_1w_pq.sql:cohere_user_1w_pq:10k"
+      "${SCRIPT_DIR}/14_cohere_user_10w_pq.sql:cohere_user_10w_pq:100k"
+      "${SCRIPT_DIR}/15_cohere_user_50w_pq.sql:cohere_user_50w_pq:500k"
+      "${SCRIPT_DIR}/16_cohere_user_100w_pq.sql:cohere_user_100w_pq:1m"
+    )
+  fi
 else
-  SQL_FILES=(
-    "${SCRIPT_DIR}"/0[1-8]_*.sql
-  )
+  if [ "$DIMS" = "all" ] || [ "$DIMS" = "128d" ]; then
+    DDL_PAIRS+=(
+      "${SCRIPT_DIR}/01_sift_user_1w.sql:sift_user_1w:10k"
+      "${SCRIPT_DIR}/02_sift_user_10w.sql:sift_user_10w:100k"
+      "${SCRIPT_DIR}/03_sift_user_50w.sql:sift_user_50w:500k"
+      "${SCRIPT_DIR}/04_sift_user_100w.sql:sift_user_100w:1m"
+    )
+  fi
+  if [ "$DIMS" = "all" ] || [ "$DIMS" = "768d" ]; then
+    DDL_PAIRS+=(
+      "${SCRIPT_DIR}/05_cohere_user_1w.sql:cohere_user_1w:10k"
+      "${SCRIPT_DIR}/06_cohere_user_10w.sql:cohere_user_10w:100k"
+      "${SCRIPT_DIR}/07_cohere_user_50w.sql:cohere_user_50w:500k"
+      "${SCRIPT_DIR}/08_cohere_user_100w.sql:cohere_user_100w:1m"
+    )
+  fi
 fi
 
 # --------------------------------------------------
@@ -191,7 +240,18 @@ if [ "${SKIP_DDL:-0}" != "1" ]; then
   echo "========================================"
   echo "Step 1: 建表"
   echo "========================================"
-  for sql_file in "${SQL_FILES[@]}"; do
+  for ddl in "${DDL_PAIRS[@]}"; do
+    sql_file="${ddl%%:*}"
+    rest="${ddl#*:}"
+    table="${rest%%:*}"
+    scale="${rest##*:}"
+    expected="${EXPECTED_ROWS[$scale]}"
+
+    if table_ready "$table" "$expected"; then
+      echo "[SKIP] $(basename "$sql_file") (${table} already ready: ${expected} rows)"
+      continue
+    fi
+
     echo "[SQL] 执行 $(basename "$sql_file")"
     ${MYSQL_CMD} -D "${DB}" < "$sql_file" 2>&1 && \
       echo "[OK]   $(basename "$sql_file")" || \
@@ -208,7 +268,7 @@ LOAD_ERRORS=0
 declare -a LOAD_PAIRS=()
 
 for scale in ${SCALE_LIST}; do
-  # 128D: 所有规模都有本地数据文件
+  # 128D: 默认只导入 1w，其余通过 ETL 扩展
   if [ "$DIMS" = "all" ] || [ "$DIMS" = "128d" ]; then
     if [ "$INDEX_MODE" = "pq_on_disk" ]; then
       table_map_name="TABLE_MAP_128D_PQ"
@@ -216,7 +276,7 @@ for scale in ${SCALE_LIST}; do
       table_map_name="TABLE_MAP_128D"
     fi
     eval 'table="${'"$table_map_name"'[$scale]:-}"'
-    if [ -n "$table" ] && [ -n "${DATASET_MAP_128D[$scale]+x}" ]; then
+    if [ "$scale" = "10k" ] && [ -n "$table" ] && [ -n "${DATASET_MAP_128D[$scale]+x}" ]; then
       dataset="${DATASET_MAP_128D[$scale]}"
       LOAD_PAIRS+=("${table}:${dataset}")
     fi
@@ -236,10 +296,17 @@ for scale in ${SCALE_LIST}; do
   fi
 done
 
+if [ "$LOAD_MODE" = "stream_only" ] || [ "$LOAD_MODE" = "etl_only" ]; then
 for pair in "${LOAD_PAIRS[@]}"; do
   table="${pair%%:*}"
   dataset="${pair##*:}"
   shard_dir="${DATA_DIR}/${dataset}"
+  expected="${EXPECTED_ROWS[10k]}"
+
+  if table_ready "$table" "$expected"; then
+    echo "[SKIP] ${table} already has expected rows (${expected})"
+    continue
+  fi
 
   if [ ! -d "$shard_dir" ]; then
     echo "[SKIP] ${shard_dir} 不存在，跳过 ${table}"
@@ -262,9 +329,10 @@ for pair in "${LOAD_PAIRS[@]}"; do
 
   echo "[DONE] ${table} 导入完成"
 done
+fi
 
 # --------------------------------------------------
-# Step 3: ETL 扩展 768D 表 (1w -> 10w -> 50w -> 100w)
+# Step 3: ETL 扩展表 (1w -> 10w -> 50w -> 100w)
 #
 # 通过 INSERT INTO SELECT 复制数据并偏移 id，避免本地生成大文件。
 # 每一步从较小的表复制多批到较大的表:
@@ -275,65 +343,98 @@ done
 # 每批 id 偏移 = batch_index * (源表每用户向量数), 保证 id 不冲突。
 # 注意: 扩展后的数据向量值有重复 (同一向量不同 id), 不影响暴力搜索基准测试。
 # --------------------------------------------------
-if [ "$DIMS" = "all" ] || [ "$DIMS" = "768d" ]; then
-  if [ "$INDEX_MODE" = "pq_on_disk" ]; then
-    SRC_1W="cohere_user_1w_pq"
-    DST_10W="cohere_user_10w_pq"
-    DST_50W="cohere_user_50w_pq"
-    DST_100W="cohere_user_100w_pq"
-  else
-    SRC_1W="cohere_user_1w"
-    DST_10W="cohere_user_10w"
-    DST_50W="cohere_user_50w"
-    DST_100W="cohere_user_100w"
+run_etl_chain() {
+  local src_1w="$1"
+  local dst_10w="$2"
+  local dst_50w="$3"
+  local dst_100w="$4"
+  local label="$5"
+  local sql
+
+  echo ""
+  echo "========================================"
+  echo "Step 3: ETL 扩展 ${label} (${src_1w} -> ${dst_10w} -> ${dst_50w} -> ${dst_100w})"
+  echo "========================================"
+
+  if ! table_ready "$src_1w" "${EXPECTED_ROWS[10k]}"; then
+    echo "[SKIP] ${src_1w} is not ready for ETL (expected ${EXPECTED_ROWS[10k]} rows, got $(table_count "$src_1w"))"
+    return
   fi
 
-  echo ""
-  echo "========================================"
-  echo "Step 3: ETL 扩展 768D 表 (${SRC_1W} -> ${DST_10W} -> ${DST_50W} -> ${DST_100W})"
-  echo "========================================"
+  if table_ready "$dst_10w" "${EXPECTED_ROWS[100k]}"; then
+    echo "[SKIP] ${dst_10w} already has expected rows (${EXPECTED_ROWS[100k]})"
+  else
+    echo ""
+    echo "[ETL] ${src_1w} -> ${dst_10w} (10 batches, id offset 10000)"
+    for batch in $(seq 0 9); do
+      offset=$((batch * 10000))
+      echo "  [ETL] batch ${batch}/9, id offset = ${offset}"
+      sql="INSERT INTO ${dst_10w} (user_id, id, embedding) SELECT user_id, id + ${offset}, embedding FROM ${src_1w};"
+      echo "  [SQL] ${sql}"
+      ${MYSQL_CMD} -D "${DB}" -e "${sql}" 2>&1 || { echo "  [FAIL] ETL batch ${batch} for ${dst_10w}"; LOAD_ERRORS=$((LOAD_ERRORS + 1)); }
+    done
+    echo "[DONE] ${dst_10w} ETL 完成"
+  fi
 
-  # --- 1w -> 10w: 复制 10 批, 每批偏移 10000 (1w 每用户有 10,000 向量) ---
-  echo ""
-  echo "[ETL] ${SRC_1W} -> ${DST_10W} (10 batches, id offset 10000)"
-  for batch in $(seq 0 9); do
-    offset=$((batch * 10000))
-    echo "  [ETL] batch ${batch}/9, id offset = ${offset}"
-    ${MYSQL_CMD} -D "${DB}" -e "
-      INSERT INTO ${DST_10W} (user_id, id, embedding)
-      SELECT user_id, id + ${offset}, embedding
-      FROM ${SRC_1W};
-    " 2>&1 || { echo "  [FAIL] ETL batch ${batch} for ${DST_10W}"; LOAD_ERRORS=$((LOAD_ERRORS + 1)); }
-  done
-  echo "[DONE] ${DST_10W} ETL 完成"
+  if table_ready "$dst_50w" "${EXPECTED_ROWS[500k]}"; then
+    echo "[SKIP] ${dst_50w} already has expected rows (${EXPECTED_ROWS[500k]})"
+  else
+    echo ""
+    echo "[ETL] ${dst_10w} -> ${dst_50w} (5 batches, id offset 100000)"
+    for batch in $(seq 0 4); do
+      offset=$((batch * 100000))
+      echo "  [ETL] batch ${batch}/4, id offset = ${offset}"
+      sql="INSERT INTO ${dst_50w} (user_id, id, embedding) SELECT user_id, id + ${offset}, embedding FROM ${dst_10w};"
+      echo "  [SQL] ${sql}"
+      ${MYSQL_CMD} -D "${DB}" -e "${sql}" 2>&1 || { echo "  [FAIL] ETL batch ${batch} for ${dst_50w}"; LOAD_ERRORS=$((LOAD_ERRORS + 1)); }
+    done
+    echo "[DONE] ${dst_50w} ETL 完成"
+  fi
 
-  # --- 10w -> 50w: 复制 5 批, 每批偏移 100000 (10w 每用户有 100,000 向量) ---
-  echo ""
-  echo "[ETL] ${DST_10W} -> ${DST_50W} (5 batches, id offset 100000)"
-  for batch in $(seq 0 4); do
-    offset=$((batch * 100000))
-    echo "  [ETL] batch ${batch}/4, id offset = ${offset}"
-    ${MYSQL_CMD} -D "${DB}" -e "
-      INSERT INTO ${DST_50W} (user_id, id, embedding)
-      SELECT user_id, id + ${offset}, embedding
-      FROM ${DST_10W};
-    " 2>&1 || { echo "  [FAIL] ETL batch ${batch} for ${DST_50W}"; LOAD_ERRORS=$((LOAD_ERRORS + 1)); }
-  done
-  echo "[DONE] ${DST_50W} ETL 完成"
+  if table_ready "$dst_100w" "${EXPECTED_ROWS[1m]}"; then
+    echo "[SKIP] ${dst_100w} already has expected rows (${EXPECTED_ROWS[1m]})"
+  else
+    echo ""
+    echo "[ETL] ${dst_50w} -> ${dst_100w} (2 batches, id offset 500000)"
+    for batch in $(seq 0 1); do
+      offset=$((batch * 500000))
+      echo "  [ETL] batch ${batch}/1, id offset = ${offset}"
+      sql="INSERT INTO ${dst_100w} (user_id, id, embedding) SELECT user_id, id + ${offset}, embedding FROM ${dst_50w};"
+      echo "  [SQL] ${sql}"
+      ${MYSQL_CMD} -D "${DB}" -e "${sql}" 2>&1 || { echo "  [FAIL] ETL batch ${batch} for ${dst_100w}"; LOAD_ERRORS=$((LOAD_ERRORS + 1)); }
+    done
+    echo "[DONE] ${dst_100w} ETL 完成"
+  fi
+}
 
-  # --- 50w -> 100w: 复制 2 批, 每批偏移 500000 (50w 每用户有 500,000 向量) ---
-  echo ""
-  echo "[ETL] ${DST_50W} -> ${DST_100W} (2 batches, id offset 500000)"
-  for batch in $(seq 0 1); do
-    offset=$((batch * 500000))
-    echo "  [ETL] batch ${batch}/1, id offset = ${offset}"
-    ${MYSQL_CMD} -D "${DB}" -e "
-      INSERT INTO ${DST_100W} (user_id, id, embedding)
-      SELECT user_id, id + ${offset}, embedding
-      FROM ${DST_50W};
-    " 2>&1 || { echo "  [FAIL] ETL batch ${batch} for ${DST_100W}"; LOAD_ERRORS=$((LOAD_ERRORS + 1)); }
-  done
-  echo "[DONE] ${DST_100W} ETL 完成"
+if [ "$LOAD_MODE" = "etl_only" ]; then
+  if [ "$INDEX_MODE" = "pq_on_disk" ]; then
+    SIFT_SRC_1W="sift_user_1w_pq"
+    SIFT_DST_10W="sift_user_10w_pq"
+    SIFT_DST_50W="sift_user_50w_pq"
+    SIFT_DST_100W="sift_user_100w_pq"
+    COHERE_SRC_1W="cohere_user_1w_pq"
+    COHERE_DST_10W="cohere_user_10w_pq"
+    COHERE_DST_50W="cohere_user_50w_pq"
+    COHERE_DST_100W="cohere_user_100w_pq"
+  else
+    SIFT_SRC_1W="sift_user_1w"
+    SIFT_DST_10W="sift_user_10w"
+    SIFT_DST_50W="sift_user_50w"
+    SIFT_DST_100W="sift_user_100w"
+    COHERE_SRC_1W="cohere_user_1w"
+    COHERE_DST_10W="cohere_user_10w"
+    COHERE_DST_50W="cohere_user_50w"
+    COHERE_DST_100W="cohere_user_100w"
+  fi
+
+  if [ "$DIMS" = "all" ] || [ "$DIMS" = "128d" ]; then
+    run_etl_chain "$SIFT_SRC_1W" "$SIFT_DST_10W" "$SIFT_DST_50W" "$SIFT_DST_100W" "128D 表"
+  fi
+
+  if [ "$DIMS" = "all" ] || [ "$DIMS" = "768d" ]; then
+    run_etl_chain "$COHERE_SRC_1W" "$COHERE_DST_10W" "$COHERE_DST_50W" "$COHERE_DST_100W" "768D 表"
+  fi
 fi
 
 # --------------------------------------------------
@@ -344,28 +445,42 @@ echo "========================================"
 echo "Step 4: 验证数据量"
 echo "========================================"
 
+EXPECTED=()
+
 if [ "$INDEX_MODE" = "pq_on_disk" ]; then
-  EXPECTED=(
-    "sift_user_1w_pq:1000000"
-    "sift_user_10w_pq:10000000"
-    "sift_user_50w_pq:50000000"
-    "sift_user_100w_pq:100000000"
-    "cohere_user_1w_pq:1000000"
-    "cohere_user_10w_pq:10000000"
-    "cohere_user_50w_pq:50000000"
-    "cohere_user_100w_pq:100000000"
-  )
+  if [ "$DIMS" = "all" ] || [ "$DIMS" = "128d" ]; then
+    EXPECTED+=(
+      "sift_user_1w_pq:1000000"
+      "sift_user_10w_pq:10000000"
+      "sift_user_50w_pq:50000000"
+      "sift_user_100w_pq:100000000"
+    )
+  fi
+  if [ "$DIMS" = "all" ] || [ "$DIMS" = "768d" ]; then
+    EXPECTED+=(
+      "cohere_user_1w_pq:1000000"
+      "cohere_user_10w_pq:10000000"
+      "cohere_user_50w_pq:50000000"
+      "cohere_user_100w_pq:100000000"
+    )
+  fi
 else
-  EXPECTED=(
-    "sift_user_1w:1000000"
-    "sift_user_10w:10000000"
-    "sift_user_50w:50000000"
-    "sift_user_100w:100000000"
-    "cohere_user_1w:1000000"
-    "cohere_user_10w:10000000"
-    "cohere_user_50w:50000000"
-    "cohere_user_100w:100000000"
-  )
+  if [ "$DIMS" = "all" ] || [ "$DIMS" = "128d" ]; then
+    EXPECTED+=(
+      "sift_user_1w:1000000"
+      "sift_user_10w:10000000"
+      "sift_user_50w:50000000"
+      "sift_user_100w:100000000"
+    )
+  fi
+  if [ "$DIMS" = "all" ] || [ "$DIMS" = "768d" ]; then
+    EXPECTED+=(
+      "cohere_user_1w:1000000"
+      "cohere_user_10w:10000000"
+      "cohere_user_50w:50000000"
+      "cohere_user_100w:100000000"
+    )
+  fi
 fi
 
 for entry in "${EXPECTED[@]}"; do

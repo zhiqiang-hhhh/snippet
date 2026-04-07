@@ -46,28 +46,28 @@ DORIS_PASS = ""
 DORIS_DB   = "test_demo"
 
 TABLES_128D = {
-    "1w":   "sift_user_1w",
-    "10w":  "sift_user_10w",
-    "50w":  "sift_user_50w",
-    "100w": "sift_user_100w",
+    "10k":  "sift_user_1w",
+    "100k": "sift_user_10w",
+    "500k": "sift_user_50w",
+    "1m":   "sift_user_100w",
 }
 TABLES_128D_PQ = {
-    "1w":   "sift_user_1w_pq",
-    "10w":  "sift_user_10w_pq",
-    "50w":  "sift_user_50w_pq",
-    "100w": "sift_user_100w_pq",
+    "10k":  "sift_user_1w_pq",
+    "100k": "sift_user_10w_pq",
+    "500k": "sift_user_50w_pq",
+    "1m":   "sift_user_100w_pq",
 }
 TABLES_768D = {
-    "1w":   "cohere_user_1w",
-    "10w":  "cohere_user_10w",
-    "50w":  "cohere_user_50w",
-    "100w": "cohere_user_100w",
+    "10k":  "cohere_user_1w",
+    "100k": "cohere_user_10w",
+    "500k": "cohere_user_50w",
+    "1m":   "cohere_user_100w",
 }
 TABLES_768D_PQ = {
-    "1w":   "cohere_user_1w_pq",
-    "10w":  "cohere_user_10w_pq",
-    "50w":  "cohere_user_50w_pq",
-    "100w": "cohere_user_100w_pq",
+    "10k":  "cohere_user_1w_pq",
+    "100k": "cohere_user_10w_pq",
+    "500k": "cohere_user_50w_pq",
+    "1m":   "cohere_user_100w_pq",
 }
 
 DIM_BASE_CONFIG = {
@@ -185,6 +185,11 @@ def load_query_vectors(dim_conf, n=None, seed=SEED):
                 vectors.append(row[0])
     conn.close()
     print(f"Loaded {len(vectors)} query vectors from {query_table}")
+    if not vectors:
+        raise RuntimeError(
+            f"No query vectors loaded from {query_table}. "
+            f"Please ensure the source table exists and contains data."
+        )
     return vectors
 
 
@@ -206,6 +211,16 @@ def run_query(conn, sql):
     return elapsed, len(rows)
 
 
+def run_query_rows(conn, sql):
+    """Execute a query and return (latency_seconds, rows)."""
+    t0 = time.perf_counter()
+    with conn.cursor() as cur:
+        cur.execute(sql)
+        rows = cur.fetchall()
+    elapsed = time.perf_counter() - t0
+    return elapsed, rows
+
+
 def percentile(data, p):
     """Calculate p-th percentile."""
     sorted_d = sorted(data)
@@ -213,6 +228,13 @@ def percentile(data, p):
     f = int(k)
     c = f + 1 if f + 1 < len(sorted_d) else f
     return sorted_d[f] + (k - f) * (sorted_d[c] - sorted_d[f])
+
+
+def recall_at_k(exact_ids, approx_ids):
+    """Compute recall@k based on ID overlap."""
+    if not exact_ids:
+        return 0.0
+    return len(set(exact_ids) & set(approx_ids)) / len(exact_ids)
 
 
 def run_bench(conn, sql_template, query_vecs, warmup=None, runs=None):
@@ -753,6 +775,80 @@ def test_high_concurrency(query_vecs, dim_conf, table_key="10w", concurrency_lev
     return pd.DataFrame(results)
 
 
+def test_recall(query_vecs, dim_conf, table_key="10w", recall_ks=None):
+    """PQ mode only: compare approximate results against brute-force ground truth."""
+    if dim_conf["search_mode"] != "pq_on_disk":
+        return pd.DataFrame()
+
+    if recall_ks is None:
+        recall_ks = [10, 100]
+
+    if not query_vecs:
+        raise RuntimeError("Recall test requires at least one query vector")
+
+    table = dim_conf["tables"][table_key]
+    exact_fn = dim_conf["metric"]
+    approx_fn = dim_conf["dist_fn"]
+    order = dim_conf["order"]
+
+    print(f"\n{'=' * 60}")
+    print(f"Scenario 11: Recall Test [{dim_conf['label']}] on {table} (user_id=42)")
+    print(f"  Comparing {approx_fn} against exact {exact_fn}")
+    print(f"{'=' * 60}")
+
+    conn = get_conn()
+    results = []
+    try:
+        for k in recall_ks:
+            recalls = []
+            exact_lat = []
+            approx_lat = []
+            for qv in query_vecs:
+                vec = format_vec(qv)
+                exact_sql = (
+                    f"SELECT id FROM {table} "
+                    f"WHERE user_id = 42 "
+                    f"ORDER BY {exact_fn}(embedding, {vec}) {order} "
+                    f"LIMIT {k}"
+                )
+                approx_sql = (
+                    f"SELECT id FROM {table} "
+                    f"WHERE user_id = 42 "
+                    f"ORDER BY {approx_fn}(embedding, {vec}) {order} "
+                    f"LIMIT {k}"
+                )
+                elapsed_exact, exact_rows = run_query_rows(conn, exact_sql)
+                elapsed_approx, approx_rows = run_query_rows(conn, approx_sql)
+                exact_ids = [r[0] for r in exact_rows]
+                approx_ids = [r[0] for r in approx_rows]
+                recalls.append(recall_at_k(exact_ids, approx_ids))
+                exact_lat.append(elapsed_exact * 1000)
+                approx_lat.append(elapsed_approx * 1000)
+
+            stats = {
+                "table": table,
+                "limit_k": k,
+                "dist_fn": approx_fn,
+                "exact_dist_fn": exact_fn,
+                "search_mode": dim_conf["search_mode"],
+                "avg_recall": round(float(np.mean(recalls)), 4),
+                "min_recall": round(float(min(recalls)), 4),
+                "max_recall": round(float(max(recalls)), 4),
+                "avg_exact_ms": round(float(np.mean(exact_lat)), 2),
+                "avg_approx_ms": round(float(np.mean(approx_lat)), 2),
+                "speedup": round(float(np.mean(exact_lat)) / max(float(np.mean(approx_lat)), 1e-9), 2),
+                "queries": len(query_vecs),
+            }
+            results.append(stats)
+            print(f"  LIMIT {k:>4d}  recall={stats['avg_recall']:.4f}  "
+                  f"exact={stats['avg_exact_ms']:.1f}ms  approx={stats['avg_approx_ms']:.1f}ms  "
+                  f"speedup={stats['speedup']:.2f}x")
+    finally:
+        conn.close()
+
+    return pd.DataFrame(results)
+
+
 # ─── Visualization ───────────────────────────────────────────────
 
 def setup_plot_style():
@@ -1081,6 +1177,35 @@ def plot_high_concurrency(df, output_dir, dist_fn="l2_distance"):
     print(f"  Saved {path}")
 
 
+def plot_recall(df, output_dir):
+    """PQ recall chart: recall and speedup vs top-k."""
+    if df.empty:
+        return
+
+    fig, ax1 = plt.subplots()
+    ax2 = ax1.twinx()
+    x = df["limit_k"]
+
+    ax1.plot(x, df["avg_recall"], "o-", color="#4C72B0", linewidth=2, markersize=8, label="Recall@K")
+    ax2.plot(x, df["speedup"], "s--", color="#55A868", linewidth=2, markersize=7, label="Speedup")
+
+    ax1.set_xlabel("Top-K (LIMIT)")
+    ax1.set_ylabel("Recall", color="#4C72B0")
+    ax2.set_ylabel("Speedup (exact / approx)", color="#55A868")
+    ax1.set_ylim(0, 1.05)
+    ax1.set_title(f"Scenario 11: PQ Recall Test\n({df['table'].iloc[0]})")
+
+    lines1, labels1 = ax1.get_legend_handles_labels()
+    lines2, labels2 = ax2.get_legend_handles_labels()
+    ax1.legend(lines1 + lines2, labels1 + labels2, loc="lower left")
+
+    plt.tight_layout()
+    path = os.path.join(output_dir, "11_recall_test.png")
+    fig.savefig(path)
+    plt.close(fig)
+    print(f"  Saved {path}")
+
+
 # ─── Repair Report ───────────────────────────────────────────────
 
 # Map scenario name -> plot function name (for dispatch)
@@ -1095,6 +1220,7 @@ _SCENARIO_PLOTTERS = {
     "cache":       "plot_cache_effect",
     "concscale":   "plot_concurrent_scale",
     "highconc":    "plot_high_concurrency",
+    "recall":      "plot_recall",
 }
 
 
@@ -1234,7 +1360,7 @@ def repair_report(report_dir, dim_conf):
 
 ALL_SCENARIOS = [
     "scale", "topk", "filter", "distfn", "concurrency",
-    "largetopk", "fullscan", "cache", "concscale", "highconc",
+    "largetopk", "fullscan", "cache", "concscale", "highconc", "recall",
 ]
 
 def main():
@@ -1268,6 +1394,7 @@ def main():
                              "  cache       - Cache warming effect\n"
                              "  concscale   - Concurrency across table sizes\n"
                              "  highconc    - High concurrency (up to 64)\n"
+                             "  recall      - PQ recall vs exact search\n"
                              "  (default: run all)")
     parser.add_argument("--parallel", type=int, default=0,
                         help="Set scan/pipeline parallelism (0=auto, 1=serial)")
@@ -1279,12 +1406,12 @@ def main():
                         help="LIMIT N for concscale queries (default: 10)")
     parser.add_argument("--tables", nargs="+", default=None, metavar="SCALE",
                         help="Table scales to test for multi-table scenarios\n"
-                             "(scale, fullscan, concscale). E.g. --tables 1w 10w\n"
-                             "(default: all 4 scales: 1w 10w 50w 100w)")
+                             "(scale, fullscan, concscale). E.g. --tables 10k 100k\n"
+                             "(default: all 4 scales: 10k 100k 500k 1m)")
     parser.add_argument("--table-key", default=None, metavar="SCALE",
                         help="Table scale for single-table scenarios\n"
                              "(topk, filter, distfn, concurrency, largetopk, cache, highconc)\n"
-                             "E.g. --table-key 50w  (default: 10w)")
+                             "E.g. --table-key 500k  (default: 100k)")
     parser.add_argument("--repair-report", metavar="DIR",
                         help="Repair an existing report directory: fix dist_fn in JSON/CSV\n"
                              "and regenerate PNG charts. Requires --dim to specify the\n"
@@ -1316,6 +1443,7 @@ def main():
 
     # Filter tables if --tables specified
     if args.tables:
+        args.tables = [t.strip().lower() for t in args.tables]
         invalid = [t for t in args.tables if t not in dim_conf["tables"]]
         if invalid:
             parser.error(f"Unknown table scale(s): {invalid}. "
@@ -1325,7 +1453,7 @@ def main():
         TABLES = dim_conf["tables"]
 
     # Resolve table_key for single-table scenarios
-    table_key = args.table_key or "10w"
+    table_key = args.table_key.strip().lower() if args.table_key else "100k"
     if table_key not in dim_conf["tables"]:
         # table_key not in filtered set — check if it exists in the full config
         full_tables = resolve_dim_conf(args.dim, args.search_mode)["tables"]
@@ -1433,6 +1561,11 @@ def main():
         df = test_high_concurrency(query_vecs, dim_conf, table_key=table_key)
         all_results["highconc"] = df
         plot_high_concurrency(df, output_dir, dist_fn)
+
+    if (run_all or "recall" in scenarios) and args.search_mode == "pq_on_disk":
+        df = test_recall(query_vecs, dim_conf, table_key=table_key)
+        all_results["recall"] = df
+        plot_recall(df, output_dir)
 
     # Save all results to CSV
     print(f"\n{'=' * 60}")
