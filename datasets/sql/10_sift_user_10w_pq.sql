@@ -12,6 +12,7 @@ CREATE TABLE sift_user_10w_pq (
   user_id int NOT NULL COMMENT "用户ID (0-99)",
   id int NOT NULL COMMENT "用户内向量ID",
   embedding array<float> NOT NULL COMMENT "128维向量",
+  INDEX idx_user_id (`user_id`) USING INVERTED,
   INDEX idx_embedding_ann (`embedding`) USING ANN PROPERTIES(
     "index_type" = "pq_on_disk",
     "metric_type" = "l2_distance",

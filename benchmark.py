@@ -30,7 +30,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import numpy as np
 import pandas as pd
-import pymysql
+import mysql.connector
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
@@ -152,15 +152,18 @@ SESSION_VARS = {}
 # ─── Helpers ─────────────────────────────────────────────────────
 
 def get_conn():
-    conn = pymysql.connect(
+    conn = mysql.connector.connect(
         host=DORIS_HOST, port=DORIS_PORT,
         user=DORIS_USER, password=DORIS_PASS,
         database=DORIS_DB, autocommit=True,
     )
     if SESSION_VARS:
-        with conn.cursor() as cur:
+        cur = conn.cursor()
+        try:
             for k, v in SESSION_VARS.items():
                 cur.execute(f"SET {k} = {v}")
+        finally:
+            cur.close()
     return conn
 
 
@@ -173,7 +176,8 @@ def load_query_vectors(dim_conf, n=None, seed=SEED):
     user_ids = rng.sample(range(100), min(n, 100))
     query_table = dim_conf["query_table"]
     vectors = []
-    with conn.cursor() as cur:
+    cur = conn.cursor()
+    try:
         for uid in user_ids:
             eid = rng.randint(0, 9999)
             cur.execute(
@@ -183,6 +187,8 @@ def load_query_vectors(dim_conf, n=None, seed=SEED):
             row = cur.fetchone()
             if row:
                 vectors.append(row[0])
+    finally:
+        cur.close()
     conn.close()
     print(f"Loaded {len(vectors)} query vectors from {query_table}")
     if not vectors:
@@ -195,28 +201,39 @@ def load_query_vectors(dim_conf, n=None, seed=SEED):
 
 def format_vec(vec_str):
     """Ensure vector string is in [v1,v2,...] format."""
-    v = vec_str.strip()
+    v = str(vec_str).strip()
     if not v.startswith("["):
         v = "[" + v + "]"
     return v
 
 
-def run_query(conn, sql):
+def vector_param():
+    """Prepared-statement placeholder for Doris array<float> query vectors."""
+    return "CAST(%s AS ARRAY<FLOAT>)"
+
+
+def run_query(conn, sql, params=None):
     """Execute a query and return (latency_seconds, row_count)."""
     t0 = time.perf_counter()
-    with conn.cursor() as cur:
-        cur.execute(sql)
+    cur = conn.cursor(prepared=params is not None)
+    try:
+        cur.execute(sql, params)
         rows = cur.fetchall()
+    finally:
+        cur.close()
     elapsed = time.perf_counter() - t0
     return elapsed, len(rows)
 
 
-def run_query_rows(conn, sql):
+def run_query_rows(conn, sql, params=None):
     """Execute a query and return (latency_seconds, rows)."""
     t0 = time.perf_counter()
-    with conn.cursor() as cur:
-        cur.execute(sql)
+    cur = conn.cursor(prepared=params is not None)
+    try:
+        cur.execute(sql, params)
         rows = cur.fetchall()
+    finally:
+        cur.close()
     elapsed = time.perf_counter() - t0
     return elapsed, rows
 
@@ -238,7 +255,7 @@ def recall_at_k(exact_ids, approx_ids):
 
 
 def run_bench(conn, sql_template, query_vecs, warmup=None, runs=None):
-    """Run benchmark for a SQL template with {vec} placeholder.
+    """Run benchmark for a SQL template with a prepared vector parameter.
 
     Returns dict with timing stats (in milliseconds).
     """
@@ -251,15 +268,15 @@ def run_bench(conn, sql_template, query_vecs, warmup=None, runs=None):
 
     for qi, qv in enumerate(query_vecs):
         vec = format_vec(qv)
-        sql = sql_template.replace("{vec}", vec)
+        params = (vec,)
 
         # warmup
         for _ in range(warmup):
-            run_query(conn, sql)
+            run_query(conn, sql_template, params)
 
         # bench
         for _ in range(runs):
-            elapsed, _ = run_query(conn, sql)
+            elapsed, _ = run_query(conn, sql_template, params)
             latencies.append(elapsed * 1000)  # ms
 
     return {
@@ -291,7 +308,7 @@ def test_scale(conn, query_vecs, dim_conf):
     for label, table in tables.items():
         sql = (f"SELECT id FROM {table} "
                f"WHERE user_id = 42 "
-               f"ORDER BY {dist_fn}(embedding, {{vec}}) {order} "
+               f"ORDER BY {dist_fn}(embedding, {vector_param()}) {order} "
                f"LIMIT 10")
         print(f"  Testing {table} ({label}/user)...", end="", flush=True)
         stats = run_bench(conn, sql, query_vecs)
@@ -321,7 +338,7 @@ def test_topk(conn, query_vecs, dim_conf, table_key="10w"):
     for k in limits:
         sql = (f"SELECT id FROM {table} "
                f"WHERE user_id = 42 "
-               f"ORDER BY {dist_fn}(embedding, {{vec}}) {order} "
+               f"ORDER BY {dist_fn}(embedding, {vector_param()}) {order} "
                f"LIMIT {k}")
         print(f"  LIMIT {k:>4d}...", end="", flush=True)
         stats = run_bench(conn, sql, query_vecs)
@@ -360,7 +377,7 @@ def test_filter(conn, query_vecs, dim_conf, table_key="10w"):
 
         sql = (f"SELECT id FROM {table} "
                f"WHERE {where} "
-               f"ORDER BY {dist_fn}(embedding, {{vec}}) {order} "
+               f"ORDER BY {dist_fn}(embedding, {vector_param()}) {order} "
                f"LIMIT 10")
         print(f"  {n_users:>3d} users...", end="", flush=True)
         stats = run_bench(conn, sql, query_vecs)
@@ -388,7 +405,7 @@ def test_distance_fn(conn, query_vecs, dim_conf, table_key="10w"):
     for fn_name, (order, expr) in functions.items():
         sql = (f"SELECT id FROM {table} "
                f"WHERE user_id = 42 "
-               f"ORDER BY {expr} {order} "
+               f"ORDER BY {expr.format(vec=vector_param())} {order} "
                f"LIMIT 10")
         print(f"  {fn_name:>20s}...", end="", flush=True)
         stats = run_bench(conn, sql, query_vecs)
@@ -420,15 +437,12 @@ def test_concurrency(query_vecs, dim_conf, table_key="10w", concurrency_levels=N
         vec = format_vec(vec_str)
         sql = (f"SELECT id FROM {table} "
                f"WHERE user_id = 42 "
-               f"ORDER BY {dist_fn}(embedding, {vec}) {order} "
+               f"ORDER BY {dist_fn}(embedding, {vector_param()}) {order} "
                f"LIMIT 10")
         latencies = []
         for _ in range(n_queries):
-            t0 = time.perf_counter()
-            with c.cursor() as cur:
-                cur.execute(sql)
-                cur.fetchall()
-            latencies.append((time.perf_counter() - t0) * 1000)
+            elapsed, _ = run_query(c, sql, (vec,))
+            latencies.append(elapsed * 1000)
         c.close()
         return latencies
 
@@ -441,10 +455,10 @@ def test_concurrency(query_vecs, dim_conf, table_key="10w", concurrency_levels=N
         wconn = get_conn()
         sql_w = (f"SELECT id FROM {table} "
                  f"WHERE user_id = 42 "
-                 f"ORDER BY {dist_fn}(embedding, {vec}) {order} "
+                 f"ORDER BY {dist_fn}(embedding, {vector_param()}) {order} "
                  f"LIMIT 10")
         for _ in range(3):
-            run_query(wconn, sql_w)
+            run_query(wconn, sql_w, (vec,))
         wconn.close()
 
         t0 = time.perf_counter()
@@ -494,7 +508,7 @@ def test_large_topk(conn, query_vecs, dim_conf, table_key="10w"):
     for k in limits:
         sql = (f"SELECT id FROM {table} "
                f"WHERE user_id = 42 "
-               f"ORDER BY {dist_fn}(embedding, {{vec}}) {order} "
+               f"ORDER BY {dist_fn}(embedding, {vector_param()}) {order} "
                f"LIMIT {k}")
         print(f"  LIMIT {k:>5d}...", end="", flush=True)
         stats = run_bench(conn, sql, query_vecs)
@@ -522,7 +536,7 @@ def test_full_scan(conn, query_vecs, dim_conf):
     results = []
     for label, table in tables.items():
         sql = (f"SELECT user_id, id FROM {table} "
-               f"ORDER BY {dist_fn}(embedding, {{vec}}) {order} "
+               f"ORDER BY {dist_fn}(embedding, {vector_param()}) {order} "
                f"LIMIT 10")
         print(f"  Full scan {table} ({label})...", end="", flush=True)
         stats = run_bench(conn, sql, query_vecs, warmup=1, runs=5)
@@ -551,12 +565,12 @@ def test_cache_effect(conn, query_vecs, dim_conf, table_key="10w"):
     vec = format_vec(query_vecs[0])
     sql = (f"SELECT id FROM {table} "
            f"WHERE user_id = 42 "
-           f"ORDER BY {dist_fn}(embedding, {vec}) {order} "
+           f"ORDER BY {dist_fn}(embedding, {vector_param()}) {order} "
            f"LIMIT 10")
 
     latencies = []
     for i in range(total_iterations):
-        elapsed, _ = run_query(conn, sql)
+        elapsed, _ = run_query(conn, sql, (vec,))
         latencies.append(elapsed * 1000)
 
     # Group into windows of 5 to show progression
@@ -618,16 +632,13 @@ def test_concurrent_scale(query_vecs, dim_conf, concurrency_levels=None, duratio
         vec = format_vec(vec_str)
         sql = (f"SELECT id FROM {table} "
                f"WHERE user_id = 42 "
-               f"ORDER BY {dist_fn}(embedding, {vec}) {order} "
+               f"ORDER BY {dist_fn}(embedding, {vector_param()}) {order} "
                f"LIMIT {limit}")
         latencies = []
         while not stop_event.is_set():
-            t0 = time.perf_counter()
             try:
-                with c.cursor() as cur:
-                    cur.execute(sql)
-                    cur.fetchall()
-                latencies.append((time.perf_counter() - t0) * 1000)
+                elapsed, _ = run_query(c, sql, (vec,))
+                latencies.append(elapsed * 1000)
             except Exception:
                 # Reconnect on error and continue
                 try:
@@ -648,10 +659,10 @@ def test_concurrent_scale(query_vecs, dim_conf, concurrency_levels=None, duratio
         vec = format_vec(query_vecs[0])
         sql_w = (f"SELECT id FROM {table} "
                  f"WHERE user_id = 42 "
-                 f"ORDER BY {dist_fn}(embedding, {vec}) {order} "
+                 f"ORDER BY {dist_fn}(embedding, {vector_param()}) {order} "
                  f"LIMIT {limit}")
         for _ in range(3):
-            run_query(wconn, sql_w)
+            run_query(wconn, sql_w, (vec,))
         wconn.close()
 
         for c_level in concurrency_levels:
@@ -718,15 +729,12 @@ def test_high_concurrency(query_vecs, dim_conf, table_key="10w", concurrency_lev
         vec = format_vec(vec_str)
         sql = (f"SELECT id FROM {table} "
                f"WHERE user_id = 42 "
-               f"ORDER BY {dist_fn}(embedding, {vec}) {order} "
+               f"ORDER BY {dist_fn}(embedding, {vector_param()}) {order} "
                f"LIMIT 10")
         latencies = []
         for _ in range(n_queries):
-            t0 = time.perf_counter()
-            with c.cursor() as cur:
-                cur.execute(sql)
-                cur.fetchall()
-            latencies.append((time.perf_counter() - t0) * 1000)
+            elapsed, _ = run_query(c, sql, (vec,))
+            latencies.append(elapsed * 1000)
         c.close()
         return latencies
 
@@ -739,10 +747,10 @@ def test_high_concurrency(query_vecs, dim_conf, table_key="10w", concurrency_lev
         wconn = get_conn()
         sql_w = (f"SELECT id FROM {table} "
                  f"WHERE user_id = 42 "
-                 f"ORDER BY {dist_fn}(embedding, {vec}) {order} "
+                 f"ORDER BY {dist_fn}(embedding, {vector_param()}) {order} "
                  f"LIMIT 10")
         for _ in range(3):
-            run_query(wconn, sql_w)
+            run_query(wconn, sql_w, (vec,))
         wconn.close()
 
         t0 = time.perf_counter()
@@ -808,17 +816,18 @@ def test_recall(query_vecs, dim_conf, table_key="10w", recall_ks=None):
                 exact_sql = (
                     f"SELECT id FROM {table} "
                     f"WHERE user_id = 42 "
-                    f"ORDER BY {exact_fn}(embedding, {vec}) {order} "
+                    f"ORDER BY {exact_fn}(embedding, {vector_param()}) {order} "
                     f"LIMIT {k}"
                 )
                 approx_sql = (
                     f"SELECT id FROM {table} "
                     f"WHERE user_id = 42 "
-                    f"ORDER BY {approx_fn}(embedding, {vec}) {order} "
+                    f"ORDER BY {approx_fn}(embedding, {vector_param()}) {order} "
                     f"LIMIT {k}"
                 )
-                elapsed_exact, exact_rows = run_query_rows(conn, exact_sql)
-                elapsed_approx, approx_rows = run_query_rows(conn, approx_sql)
+                params = (vec,)
+                elapsed_exact, exact_rows = run_query_rows(conn, exact_sql, params)
+                elapsed_approx, approx_rows = run_query_rows(conn, approx_sql, params)
                 exact_ids = [r[0] for r in exact_rows]
                 approx_ids = [r[0] for r in approx_rows]
                 recalls.append(recall_at_k(exact_ids, approx_ids))
