@@ -145,6 +145,9 @@ BENCH_RUNS   = 10   # iterations per test case
 NUM_QUERIES  = 5    # different query vectors to average over
 SEED         = 42
 OUTPUT_DIR   = "benchmark_results"
+USER_MODE    = "fixed"
+FIXED_USER_ID = 42
+TOTAL_USERS  = 100
 
 # Session variables to SET on each new connection (populated by --parallel etc.)
 SESSION_VARS = {}
@@ -167,6 +170,59 @@ def get_conn():
     return conn
 
 
+def benchmark_user_label(user_mode=None, fixed_user_id=None):
+    """Human-readable label for the current user filter mode."""
+    mode = USER_MODE if user_mode is None else user_mode
+    uid = FIXED_USER_ID if fixed_user_id is None else fixed_user_id
+    return f"user_id={uid}" if mode == "fixed" else "user_id=query-specific"
+
+
+def query_user_id(query_item):
+    """Resolve the user_id tied to a sampled query vector."""
+    if isinstance(query_item, dict):
+        return int(query_item["user_id"])
+    return FIXED_USER_ID
+
+
+def query_vector(query_item):
+    """Return the embedding payload from a sampled query item."""
+    if isinstance(query_item, dict):
+        return query_item["embedding"]
+    return query_item
+
+
+def single_user_where(query_item):
+    """WHERE clause for single-user benchmarks."""
+    user_id = FIXED_USER_ID if USER_MODE == "fixed" else query_user_id(query_item)
+    return f"user_id = {user_id}"
+
+
+def filter_where_clause(n_users, query_item):
+    """WHERE clause for filter-selectivity benchmarks."""
+    anchor_user_id = FIXED_USER_ID if USER_MODE == "fixed" else query_user_id(query_item)
+    if n_users <= 1:
+        return f"user_id = {anchor_user_id}"
+
+    other_user_ids = [uid for uid in range(TOTAL_USERS) if uid != anchor_user_id]
+    rng = random.Random(SEED * 1000 + n_users * 100 + anchor_user_id)
+    sampled = [anchor_user_id] + rng.sample(other_user_ids, n_users - 1)
+    return f"user_id IN ({','.join(map(str, sorted(sampled)))})"
+
+
+def add_run_metadata(stats):
+    """Attach common run metadata to a result row."""
+    stats["user_mode"] = USER_MODE
+    stats["user_label"] = benchmark_user_label()
+    return stats
+
+
+def dataframe_user_label(df):
+    """Get a display label from a result DataFrame, with legacy fallback."""
+    if "user_label" in df.columns and not df.empty:
+        return df["user_label"].iloc[0]
+    return benchmark_user_label("fixed", 42)
+
+
 def load_query_vectors(dim_conf, n=None, seed=SEED):
     """Pick n random embedding vectors from the smallest table as query vectors."""
     if n is None:
@@ -186,7 +242,11 @@ def load_query_vectors(dim_conf, n=None, seed=SEED):
             )
             row = cur.fetchone()
             if row:
-                vectors.append(row[0])
+                vectors.append({
+                    "user_id": uid,
+                    "id": eid,
+                    "embedding": row[0],
+                })
     finally:
         cur.close()
     conn.close()
@@ -267,16 +327,17 @@ def run_bench(conn, sql_template, query_vecs, warmup=None, runs=None):
     latencies = []
 
     for qi, qv in enumerate(query_vecs):
-        vec = format_vec(qv)
+        sql = sql_template(qv) if callable(sql_template) else sql_template
+        vec = format_vec(query_vector(qv))
         params = (vec,)
 
         # warmup
         for _ in range(warmup):
-            run_query(conn, sql_template, params)
+            run_query(conn, sql, params)
 
         # bench
         for _ in range(runs):
-            elapsed, _ = run_query(conn, sql_template, params)
+            elapsed, _ = run_query(conn, sql, params)
             latencies.append(elapsed * 1000)  # ms
 
     return {
@@ -298,20 +359,23 @@ def test_scale(conn, query_vecs, dim_conf):
     tables = dim_conf["tables"]
     dist_fn = dim_conf["dist_fn"]
     order = dim_conf["order"]
+    user_label = benchmark_user_label()
 
     print("\n" + "=" * 60)
-    print(f"Scenario 1: Scale Test [{dim_conf['label']}] (user_id=42, LIMIT 10)")
+    print(f"Scenario 1: Scale Test [{dim_conf['label']}] ({user_label}, LIMIT 10)")
     print("  How does latency change with per-user data volume?")
     print("=" * 60)
 
     results = []
     for label, table in tables.items():
-        sql = (f"SELECT id FROM {table} "
-               f"WHERE user_id = 42 "
-               f"ORDER BY {dist_fn}(embedding, {vector_param()}) {order} "
-               f"LIMIT 10")
+        sql = lambda qv, table=table: (
+            f"SELECT id FROM {table} "
+            f"WHERE {single_user_where(qv)} "
+            f"ORDER BY {dist_fn}(embedding, {vector_param()}) {order} "
+            f"LIMIT 10"
+        )
         print(f"  Testing {table} ({label}/user)...", end="", flush=True)
-        stats = run_bench(conn, sql, query_vecs)
+        stats = add_run_metadata(run_bench(conn, sql, query_vecs))
         stats["table"] = table
         stats["scale"] = label
         stats["dist_fn"] = dist_fn
@@ -328,20 +392,23 @@ def test_topk(conn, query_vecs, dim_conf, table_key="10w"):
     dist_fn = dim_conf["dist_fn"]
     order = dim_conf["order"]
     limits = [1, 10, 50, 100, 500]
+    user_label = benchmark_user_label()
 
     print(f"\n{'=' * 60}")
-    print(f"Scenario 2: Top-K Test [{dim_conf['label']}] on {table} (user_id=42)")
+    print(f"Scenario 2: Top-K Test [{dim_conf['label']}] on {table} ({user_label})")
     print(f"  How does LIMIT K affect latency?")
     print(f"{'=' * 60}")
 
     results = []
     for k in limits:
-        sql = (f"SELECT id FROM {table} "
-               f"WHERE user_id = 42 "
-               f"ORDER BY {dist_fn}(embedding, {vector_param()}) {order} "
-               f"LIMIT {k}")
+        sql = lambda qv, table=table, k=k: (
+            f"SELECT id FROM {table} "
+            f"WHERE {single_user_where(qv)} "
+            f"ORDER BY {dist_fn}(embedding, {vector_param()}) {order} "
+            f"LIMIT {k}"
+        )
         print(f"  LIMIT {k:>4d}...", end="", flush=True)
-        stats = run_bench(conn, sql, query_vecs)
+        stats = add_run_metadata(run_bench(conn, sql, query_vecs))
         stats["table"] = table
         stats["limit_k"] = k
         stats["dist_fn"] = dist_fn
@@ -364,26 +431,22 @@ def test_filter(conn, query_vecs, dim_conf, table_key="10w"):
     print(f"  How does scanning more users affect latency?")
     print(f"{'=' * 60}")
 
-    rng = random.Random(SEED)
-    all_users = list(range(100))
+    user_label = benchmark_user_label()
 
     results = []
     for n_users in user_counts:
-        uids = sorted(rng.sample(all_users, n_users))
-        if n_users == 1:
-            where = f"user_id = {uids[0]}"
-        else:
-            where = f"user_id IN ({','.join(map(str, uids))})"
-
-        sql = (f"SELECT id FROM {table} "
-               f"WHERE {where} "
-               f"ORDER BY {dist_fn}(embedding, {vector_param()}) {order} "
-               f"LIMIT 10")
+        sql = lambda qv, table=table, n_users=n_users: (
+            f"SELECT id FROM {table} "
+            f"WHERE {filter_where_clause(n_users, qv)} "
+            f"ORDER BY {dist_fn}(embedding, {vector_param()}) {order} "
+            f"LIMIT 10"
+        )
         print(f"  {n_users:>3d} users...", end="", flush=True)
-        stats = run_bench(conn, sql, query_vecs)
+        stats = add_run_metadata(run_bench(conn, sql, query_vecs))
         stats["table"] = table
         stats["n_users"] = n_users
         stats["dist_fn"] = dist_fn
+        stats["filter_anchor"] = user_label
         stats["search_mode"] = dim_conf["search_mode"]
         results.append(stats)
         print(f"  avg={stats['avg_ms']:.1f}ms  p50={stats['p50_ms']:.1f}ms  p99={stats['p99_ms']:.1f}ms")
@@ -395,20 +458,23 @@ def test_distance_fn(conn, query_vecs, dim_conf, table_key="10w"):
     """Scenario 4: Compare different distance/similarity functions."""
     table = dim_conf["tables"][table_key]
     functions = dim_conf["distfn_functions"]
+    user_label = benchmark_user_label()
 
     print(f"\n{'=' * 60}")
-    print(f"Scenario 4: Distance Function Test [{dim_conf['label']}] on {table} (user_id=42, LIMIT 10)")
+    print(f"Scenario 4: Distance Function Test [{dim_conf['label']}] on {table} ({user_label}, LIMIT 10)")
     print(f"  Comparing: {' / '.join(functions.keys())}")
     print(f"{'=' * 60}")
 
     results = []
     for fn_name, (order, expr) in functions.items():
-        sql = (f"SELECT id FROM {table} "
-               f"WHERE user_id = 42 "
-               f"ORDER BY {expr.format(vec=vector_param())} {order} "
-               f"LIMIT 10")
+        sql = lambda qv, table=table, order=order, expr=expr: (
+            f"SELECT id FROM {table} "
+            f"WHERE {single_user_where(qv)} "
+            f"ORDER BY {expr.format(vec=vector_param())} {order} "
+            f"LIMIT 10"
+        )
         print(f"  {fn_name:>20s}...", end="", flush=True)
-        stats = run_bench(conn, sql, query_vecs)
+        stats = add_run_metadata(run_bench(conn, sql, query_vecs))
         stats["table"] = table
         stats["function"] = fn_name
         stats["search_mode"] = dim_conf["search_mode"]
@@ -425,18 +491,19 @@ def test_concurrency(query_vecs, dim_conf, table_key="10w", concurrency_levels=N
     table = dim_conf["tables"][table_key]
     dist_fn = dim_conf["dist_fn"]
     order = dim_conf["order"]
+    user_label = benchmark_user_label()
 
     print(f"\n{'=' * 60}")
-    print(f"Scenario 5: Concurrency Test [{dim_conf['label']}] on {table} (user_id=42, LIMIT 10)")
+    print(f"Scenario 5: Concurrency Test [{dim_conf['label']}] on {table} ({user_label}, LIMIT 10)")
     print(f"  Measuring throughput at different concurrency levels")
     print(f"{'=' * 60}")
 
-    def worker(vec_str, n_queries=20):
+    def worker(query_item, n_queries=20):
         """Each worker runs n_queries and returns total latency."""
         c = get_conn()
-        vec = format_vec(vec_str)
+        vec = format_vec(query_vector(query_item))
         sql = (f"SELECT id FROM {table} "
-               f"WHERE user_id = 42 "
+               f"WHERE {single_user_where(query_item)} "
                f"ORDER BY {dist_fn}(embedding, {vector_param()}) {order} "
                f"LIMIT 10")
         latencies = []
@@ -449,12 +516,13 @@ def test_concurrency(query_vecs, dim_conf, table_key="10w", concurrency_levels=N
     results = []
     for c_level in concurrency_levels:
         queries_per_worker = max(10, 40 // c_level)
-        vec = format_vec(query_vecs[0])
+        warmup_query = query_vecs[0]
+        vec = format_vec(query_vector(warmup_query))
 
         # Warmup
         wconn = get_conn()
         sql_w = (f"SELECT id FROM {table} "
-                 f"WHERE user_id = 42 "
+                 f"WHERE {single_user_where(warmup_query)} "
                  f"ORDER BY {dist_fn}(embedding, {vector_param()}) {order} "
                  f"LIMIT 10")
         for _ in range(3):
@@ -486,6 +554,7 @@ def test_concurrency(query_vecs, dim_conf, table_key="10w", concurrency_levels=N
             "p90_ms":       round(percentile(all_latencies, 90), 2),
             "p99_ms":       round(percentile(all_latencies, 99), 2),
         }
+        add_run_metadata(stats)
         results.append(stats)
         print(f"  C={c_level:>2d}  QPS={qps:>7.1f}  avg={stats['avg_ms']:.1f}ms  p99={stats['p99_ms']:.1f}ms")
 
@@ -498,20 +567,23 @@ def test_large_topk(conn, query_vecs, dim_conf, table_key="10w"):
     dist_fn = dim_conf["dist_fn"]
     order = dim_conf["order"]
     limits = [100, 500, 1000, 2000, 5000]
+    user_label = benchmark_user_label()
 
     print(f"\n{'=' * 60}")
-    print(f"Scenario 6: Large Top-K Test [{dim_conf['label']}] on {table} (user_id=42)")
+    print(f"Scenario 6: Large Top-K Test [{dim_conf['label']}] on {table} ({user_label})")
     print(f"  How does very large LIMIT affect latency?")
     print(f"{'=' * 60}")
 
     results = []
     for k in limits:
-        sql = (f"SELECT id FROM {table} "
-               f"WHERE user_id = 42 "
-               f"ORDER BY {dist_fn}(embedding, {vector_param()}) {order} "
-               f"LIMIT {k}")
+        sql = lambda qv, table=table, k=k: (
+            f"SELECT id FROM {table} "
+            f"WHERE {single_user_where(qv)} "
+            f"ORDER BY {dist_fn}(embedding, {vector_param()}) {order} "
+            f"LIMIT {k}"
+        )
         print(f"  LIMIT {k:>5d}...", end="", flush=True)
-        stats = run_bench(conn, sql, query_vecs)
+        stats = add_run_metadata(run_bench(conn, sql, query_vecs))
         stats["table"] = table
         stats["limit_k"] = k
         stats["dist_fn"] = dist_fn
@@ -556,15 +628,17 @@ def test_cache_effect(conn, query_vecs, dim_conf, table_key="10w"):
     dist_fn = dim_conf["dist_fn"]
     order = dim_conf["order"]
     total_iterations = 50
+    user_label = benchmark_user_label()
 
     print(f"\n{'=' * 60}")
     print(f"Scenario 8: Cache Effect Test [{dim_conf['label']}] on {table}")
     print(f"  Running same query {total_iterations} times, no warmup")
     print(f"{'=' * 60}")
 
-    vec = format_vec(query_vecs[0])
+    cache_query = query_vecs[0]
+    vec = format_vec(query_vector(cache_query))
     sql = (f"SELECT id FROM {table} "
-           f"WHERE user_id = 42 "
+           f"WHERE {single_user_where(cache_query)} "
            f"ORDER BY {dist_fn}(embedding, {vector_param()}) {order} "
            f"LIMIT 10")
 
@@ -584,6 +658,8 @@ def test_cache_effect(conn, query_vecs, dim_conf, table_key="10w"):
             "table": table,
             "dist_fn": dist_fn,
             "search_mode": dim_conf["search_mode"],
+            "user_mode": USER_MODE,
+            "user_label": user_label,
             "avg_ms": round(np.mean(chunk), 2),
             "min_ms": round(min(chunk), 2),
             "max_ms": round(max(chunk), 2),
@@ -600,6 +676,8 @@ def test_cache_effect(conn, query_vecs, dim_conf, table_key="10w"):
         "table": table,
         "dist_fn": dist_fn,
         "search_mode": dim_conf["search_mode"],
+        "user_mode": USER_MODE,
+        "user_label": user_label,
     })
     return pd.DataFrame(results), raw_df
 
@@ -618,20 +696,21 @@ def test_concurrent_scale(query_vecs, dim_conf, concurrency_levels=None, duratio
     tables = dim_conf["tables"]
     dist_fn = dim_conf["dist_fn"]
     order = dim_conf["order"]
+    user_label = benchmark_user_label()
 
     print(f"\n{'=' * 60}")
     print(f"Scenario 9: Concurrent Scale Test [{dim_conf['label']}]")
     print(f"  Concurrency levels: {concurrency_levels}")
     print(f"  Duration per case : {duration}s")
-    print(f"  Query: WHERE user_id=42 ORDER BY {dist_fn}(...) {order} LIMIT {limit}")
+    print(f"  Query: WHERE {user_label} ORDER BY {dist_fn}(...) {order} LIMIT {limit}")
     print(f"{'=' * 60}")
 
-    def worker(table, vec_str, stop_event):
+    def worker(table, query_item, stop_event):
         """Run queries in a loop until stop_event is set."""
         c = get_conn()
-        vec = format_vec(vec_str)
+        vec = format_vec(query_vector(query_item))
         sql = (f"SELECT id FROM {table} "
-               f"WHERE user_id = 42 "
+               f"WHERE {single_user_where(query_item)} "
                f"ORDER BY {dist_fn}(embedding, {vector_param()}) {order} "
                f"LIMIT {limit}")
         latencies = []
@@ -656,9 +735,10 @@ def test_concurrent_scale(query_vecs, dim_conf, concurrency_levels=None, duratio
     for label, table in tables.items():
         # Warmup once per table
         wconn = get_conn()
-        vec = format_vec(query_vecs[0])
+        warmup_query = query_vecs[0]
+        vec = format_vec(query_vector(warmup_query))
         sql_w = (f"SELECT id FROM {table} "
-                 f"WHERE user_id = 42 "
+                 f"WHERE {single_user_where(warmup_query)} "
                  f"ORDER BY {dist_fn}(embedding, {vector_param()}) {order} "
                  f"LIMIT {limit}")
         for _ in range(3):
@@ -702,6 +782,7 @@ def test_concurrent_scale(query_vecs, dim_conf, concurrency_levels=None, duratio
                 "p90_ms":        round(percentile(all_latencies, 90), 2) if all_latencies else 0,
                 "p99_ms":        round(percentile(all_latencies, 99), 2) if all_latencies else 0,
             }
+            add_run_metadata(stats)
             results.append(stats)
             print(f"  {table:>20s}  C={c_level:<3d}  QPS={qps:>7.1f}  "
                   f"avg={stats['avg_ms']:.1f}ms  p50={stats['p50_ms']:.1f}ms  "
@@ -718,17 +799,18 @@ def test_high_concurrency(query_vecs, dim_conf, table_key="10w", concurrency_lev
     table = dim_conf["tables"][table_key]
     dist_fn = dim_conf["dist_fn"]
     order = dim_conf["order"]
+    user_label = benchmark_user_label()
 
     print(f"\n{'=' * 60}")
     print(f"Scenario 10: High Concurrency Test [{dim_conf['label']}] on {table} (LIMIT 10)")
     print(f"  Extended concurrency levels: {concurrency_levels}")
     print(f"{'=' * 60}")
 
-    def worker(vec_str, n_queries=20):
+    def worker(query_item, n_queries=20):
         c = get_conn()
-        vec = format_vec(vec_str)
+        vec = format_vec(query_vector(query_item))
         sql = (f"SELECT id FROM {table} "
-               f"WHERE user_id = 42 "
+               f"WHERE {single_user_where(query_item)} "
                f"ORDER BY {dist_fn}(embedding, {vector_param()}) {order} "
                f"LIMIT 10")
         latencies = []
@@ -741,12 +823,13 @@ def test_high_concurrency(query_vecs, dim_conf, table_key="10w", concurrency_lev
     results = []
     for c_level in concurrency_levels:
         queries_per_worker = max(10, 60 // c_level)
-        vec = format_vec(query_vecs[0])
+        warmup_query = query_vecs[0]
+        vec = format_vec(query_vector(warmup_query))
 
         # Warmup
         wconn = get_conn()
         sql_w = (f"SELECT id FROM {table} "
-                 f"WHERE user_id = 42 "
+                 f"WHERE {single_user_where(warmup_query)} "
                  f"ORDER BY {dist_fn}(embedding, {vector_param()}) {order} "
                  f"LIMIT 10")
         for _ in range(3):
@@ -777,6 +860,7 @@ def test_high_concurrency(query_vecs, dim_conf, table_key="10w", concurrency_lev
             "p90_ms":        round(percentile(all_latencies, 90), 2),
             "p99_ms":        round(percentile(all_latencies, 99), 2),
         }
+        add_run_metadata(stats)
         results.append(stats)
         print(f"  C={c_level:>2d}  QPS={qps:>7.1f}  avg={stats['avg_ms']:.1f}ms  p99={stats['p99_ms']:.1f}ms")
 
@@ -798,9 +882,10 @@ def test_recall(query_vecs, dim_conf, table_key="10w", recall_ks=None):
     exact_fn = dim_conf["metric"]
     approx_fn = dim_conf["dist_fn"]
     order = dim_conf["order"]
+    user_label = benchmark_user_label()
 
     print(f"\n{'=' * 60}")
-    print(f"Scenario 11: Recall Test [{dim_conf['label']}] on {table} (user_id=42)")
+    print(f"Scenario 11: Recall Test [{dim_conf['label']}] on {table} ({user_label})")
     print(f"  Comparing {approx_fn} against exact {exact_fn}")
     print(f"{'=' * 60}")
 
@@ -812,16 +897,16 @@ def test_recall(query_vecs, dim_conf, table_key="10w", recall_ks=None):
             exact_lat = []
             approx_lat = []
             for qv in query_vecs:
-                vec = format_vec(qv)
+                vec = format_vec(query_vector(qv))
                 exact_sql = (
                     f"SELECT id FROM {table} "
-                    f"WHERE user_id = 42 "
+                    f"WHERE {single_user_where(qv)} "
                     f"ORDER BY {exact_fn}(embedding, {vector_param()}) {order} "
                     f"LIMIT {k}"
                 )
                 approx_sql = (
                     f"SELECT id FROM {table} "
-                    f"WHERE user_id = 42 "
+                    f"WHERE {single_user_where(qv)} "
                     f"ORDER BY {approx_fn}(embedding, {vector_param()}) {order} "
                     f"LIMIT {k}"
                 )
@@ -848,6 +933,7 @@ def test_recall(query_vecs, dim_conf, table_key="10w", recall_ks=None):
                 "speedup": round(float(np.mean(exact_lat)) / max(float(np.mean(approx_lat)), 1e-9), 2),
                 "queries": len(query_vecs),
             }
+            add_run_metadata(stats)
             results.append(stats)
             print(f"  LIMIT {k:>4d}  recall={stats['avg_recall']:.4f}  "
                   f"exact={stats['avg_exact_ms']:.1f}ms  approx={stats['avg_approx_ms']:.1f}ms  "
@@ -884,7 +970,7 @@ def plot_scale(df, output_dir, dist_fn="l2_distance"):
 
     ax.set_xlabel("Vectors per User")
     ax.set_ylabel("Latency (ms)")
-    ax.set_title(f"Scenario 1: Latency vs Data Scale\n(user_id=42, LIMIT 10, {dist_fn})")
+    ax.set_title(f"Scenario 1: Latency vs Data Scale\n({dataframe_user_label(df)}, LIMIT 10, {dist_fn})")
     ax.set_xticks(x)
     ax.set_xticklabels(df["scale"])
     ax.legend()
@@ -909,7 +995,7 @@ def plot_topk(df, output_dir, dist_fn="l2_distance"):
 
     ax.set_xlabel("Top-K (LIMIT)")
     ax.set_ylabel("Latency (ms)")
-    ax.set_title(f"Scenario 2: Latency vs Top-K\n({df['table'].iloc[0]}, user_id=42, {dist_fn})")
+    ax.set_title(f"Scenario 2: Latency vs Top-K\n({df['table'].iloc[0]}, {dataframe_user_label(df)}, {dist_fn})")
     ax.legend()
 
     plt.tight_layout()
@@ -959,7 +1045,7 @@ def plot_distance_fn(df, output_dir):
 
     ax.set_xlabel("Latency (ms)")
     ax.set_ylabel("Distance Function")
-    ax.set_title(f"Scenario 4: Distance Function Comparison\n({df['table'].iloc[0]}, user_id=42, LIMIT 10)")
+    ax.set_title(f"Scenario 4: Distance Function Comparison\n({df['table'].iloc[0]}, {dataframe_user_label(df)}, LIMIT 10)")
     ax.set_yticks(y)
     ax.set_yticklabels(df["function"])
     ax.legend()
@@ -987,7 +1073,7 @@ def plot_concurrency(df, output_dir, dist_fn="l2_distance"):
     ax1.set_xlabel("Concurrency")
     ax1.set_ylabel("QPS", color="#4C72B0")
     ax2.set_ylabel("Latency (ms)", color="#C44E52")
-    ax1.set_title(f"Scenario 5: Concurrency Test\n({df['table'].iloc[0]}, user_id=42, LIMIT 10, {dist_fn})")
+    ax1.set_title(f"Scenario 5: Concurrency Test\n({df['table'].iloc[0]}, {dataframe_user_label(df)}, LIMIT 10, {dist_fn})")
     ax1.xaxis.set_major_locator(MaxNLocator(integer=True))
 
     lines1, labels1 = ax1.get_legend_handles_labels()
@@ -1011,7 +1097,7 @@ def plot_large_topk(df, output_dir, dist_fn="l2_distance"):
 
     ax.set_xlabel("Top-K (LIMIT)")
     ax.set_ylabel("Latency (ms)")
-    ax.set_title(f"Scenario 6: Large Top-K Test\n({df['table'].iloc[0]}, user_id=42, {dist_fn})")
+    ax.set_title(f"Scenario 6: Large Top-K Test\n({df['table'].iloc[0]}, {dataframe_user_label(df)}, {dist_fn})")
     ax.legend()
 
     plt.tight_layout()
@@ -1063,7 +1149,7 @@ def plot_cache_effect(raw_df, output_dir):
 
     ax.set_xlabel("Iteration")
     ax.set_ylabel("Latency (ms)")
-    ax.set_title(f"Scenario 8: Cache Effect Test\n({raw_df['table'].iloc[0]}, user_id=42, LIMIT 10)")
+    ax.set_title(f"Scenario 8: Cache Effect Test\n({raw_df['table'].iloc[0]}, {dataframe_user_label(raw_df)}, LIMIT 10)")
     ax.legend()
 
     plt.tight_layout()
@@ -1108,7 +1194,7 @@ def plot_concurrent_scale(df, output_dir, dist_fn="l2_distance"):
     ax.set_xlabel("Table Scale")
     ax.set_ylabel("QPS")
     ax.set_title(f"Scenario 9: Concurrent Scale Test — QPS\n"
-                 f"(user_id=42, LIMIT 10, {dist_fn}, {dur}s per case)")
+                 f"({dataframe_user_label(df)}, LIMIT 10, {dist_fn}, {dur}s per case)")
     ax.set_xticks(np.arange(n_scales) + bar_width * (n_conc - 1) / 2)
     ax.set_xticklabels(scales)
     ax.legend(title="Concurrency")
@@ -1144,7 +1230,7 @@ def plot_concurrent_scale(df, output_dir, dist_fn="l2_distance"):
         axes[r][c_idx].set_visible(False)
 
     fig.suptitle(f"Scenario 9: Concurrent Scale Test — Latency\n"
-                 f"(user_id=42, LIMIT 10, {dist_fn}, {dur}s per case)", fontsize=13)
+                 f"({dataframe_user_label(df)}, LIMIT 10, {dist_fn}, {dur}s per case)", fontsize=13)
     plt.tight_layout()
     path_b = os.path.join(output_dir, "09b_concurrent_scale_latency.png")
     fig.savefig(path_b)
@@ -1172,7 +1258,7 @@ def plot_high_concurrency(df, output_dir, dist_fn="l2_distance"):
     ax1.set_xlabel("Concurrency")
     ax1.set_ylabel("QPS", color="#4C72B0")
     ax2.set_ylabel("Latency (ms)", color="#C44E52")
-    ax1.set_title(f"Scenario 10: High Concurrency Test\n({df['table'].iloc[0]}, user_id=42, LIMIT 10, {dist_fn})")
+    ax1.set_title(f"Scenario 10: High Concurrency Test\n({df['table'].iloc[0]}, {dataframe_user_label(df)}, LIMIT 10, {dist_fn})")
     ax1.xaxis.set_major_locator(MaxNLocator(integer=True))
 
     lines1, labels1 = ax1.get_legend_handles_labels()
@@ -1373,7 +1459,7 @@ ALL_SCENARIOS = [
 ]
 
 def main():
-    global DORIS_HOST, DORIS_PORT, DORIS_USER, DORIS_PASS, DORIS_DB, BENCH_RUNS, NUM_QUERIES
+    global DORIS_HOST, DORIS_PORT, DORIS_USER, DORIS_PASS, DORIS_DB, BENCH_RUNS, NUM_QUERIES, USER_MODE, FIXED_USER_ID
 
     parser = argparse.ArgumentParser(
         description="Doris Vector Search Benchmark",
@@ -1387,6 +1473,11 @@ def main():
     parser.add_argument("--output", default=OUTPUT_DIR)
     parser.add_argument("--runs", type=int, default=BENCH_RUNS, help="Iterations per test case")
     parser.add_argument("--queries", type=int, default=NUM_QUERIES, help="Number of query vectors")
+    parser.add_argument("--user-mode", default="fixed", choices=["fixed", "query"],
+                        help="User filter mode: fixed uses one user_id for all single-user scenarios; "
+                             "query uses each sampled query vector's own user_id")
+    parser.add_argument("--fixed-user-id", type=int, default=FIXED_USER_ID,
+                        help="Fixed user_id used when --user-mode fixed (default: 42)")
     parser.add_argument("--dim", type=int, default=128, choices=[128, 768],
                         help="Vector dimension: 128 (SIFT) or 768 (Cohere)")
     parser.add_argument("--search-mode", default="bruteforce", choices=["bruteforce", "pq_on_disk"],
@@ -1440,6 +1531,8 @@ def main():
     DORIS_DB   = args.db
     BENCH_RUNS = args.runs
     NUM_QUERIES = args.queries
+    USER_MODE = args.user_mode
+    FIXED_USER_ID = args.fixed_user_id
 
     # Apply parallelism constraints if requested
     if args.parallel > 0:
@@ -1447,7 +1540,8 @@ def main():
         SESSION_VARS["parallel_fragment_exec_instance_num"] = args.parallel
         SESSION_VARS["max_scanners_concurrency"] = args.parallel
 
-    dim_conf = resolve_dim_conf(args.dim, args.search_mode)
+    full_dim_conf = resolve_dim_conf(args.dim, args.search_mode)
+    dim_conf = full_dim_conf
     TABLES = dim_conf["tables"]
 
     # Filter tables if --tables specified
@@ -1461,16 +1555,26 @@ def main():
         dim_conf["tables"] = {k: v for k, v in dim_conf["tables"].items() if k in args.tables}
         TABLES = dim_conf["tables"]
 
-    # Resolve table_key for single-table scenarios
-    table_key = args.table_key.strip().lower() if args.table_key else "100k"
+    # Resolve table_key for single-table scenarios. If only one table scale is
+    # selected via --tables, use it as the implicit single-table target.
+    if args.table_key:
+        table_key = args.table_key.strip().lower()
+    elif args.tables and len(args.tables) == 1:
+        table_key = args.tables[0]
+    else:
+        table_key = "100k"
     if table_key not in dim_conf["tables"]:
         # table_key not in filtered set — check if it exists in the full config
-        full_tables = resolve_dim_conf(args.dim, args.search_mode)["tables"]
+        full_tables = full_dim_conf["tables"]
         if table_key not in full_tables:
             parser.error(f"Unknown table-key '{table_key}'. "
                          f"Valid: {list(full_tables.keys())}")
-        # table_key exists but was filtered out by --tables; use original full tables for lookup
-        # (single-table scenarios don't need to be in the --tables filter)
+        # table_key exists but was filtered out by --tables. Keep the filtered
+        # table list for multi-table scenarios, but make the single-table target
+        # available for topk/filter/concurrency/recall-style scenarios.
+        dim_conf = dict(dim_conf)
+        dim_conf["tables"] = dict(dim_conf["tables"])
+        dim_conf["tables"][table_key] = full_tables[table_key]
 
     # Append dimension suffix to output dir if not already present
     output_dir = args.output
@@ -1488,6 +1592,7 @@ def main():
     print(f"  Host: {DORIS_HOST}:{DORIS_PORT}  DB: {DORIS_DB}")
     print(f"  Dim: {args.dim}  Mode: {args.search_mode}  Dist: {dim_conf['dist_fn']}")
     print(f"  Runs: {BENCH_RUNS}  Query vectors: {NUM_QUERIES}")
+    print(f"  User mode: {USER_MODE} ({benchmark_user_label()})")
     print(f"  Tables: {list(dim_conf['tables'].keys())}  Table-key: {table_key}")
     print(f"  Parallelism: {args.parallel if args.parallel > 0 else 'auto'}")
     print(f"  Output: {output_dir}/")
