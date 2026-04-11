@@ -143,6 +143,7 @@ TABLES = TABLES_128D
 WARMUP_RUNS  = 2
 BENCH_RUNS   = 10   # iterations per test case
 NUM_QUERIES  = 5    # different query vectors to average over
+RECALL_MIN_QUERIES = 20
 SEED         = 42
 OUTPUT_DIR   = "benchmark_results"
 USER_MODE    = "fixed"
@@ -154,13 +155,13 @@ SESSION_VARS = {}
 
 # ─── Helpers ─────────────────────────────────────────────────────
 
-def get_conn():
+def get_conn(apply_session_vars=True):
     conn = mysql.connector.connect(
         host=DORIS_HOST, port=DORIS_PORT,
         user=DORIS_USER, password=DORIS_PASS,
         database=DORIS_DB, autocommit=True,
     )
-    if SESSION_VARS:
+    if apply_session_vars and SESSION_VARS:
         cur = conn.cursor()
         try:
             for k, v in SESSION_VARS.items():
@@ -223,40 +224,68 @@ def dataframe_user_label(df):
     return benchmark_user_label("fixed", 42)
 
 
+def table_exists(conn, table_name):
+    """Check whether a table exists in the active Doris database."""
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            "SELECT 1 FROM information_schema.tables "
+            "WHERE table_schema = %s AND table_name = %s LIMIT 1",
+            (DORIS_DB, table_name),
+        )
+        return cur.fetchone() is not None
+    finally:
+        cur.close()
+
+
 def load_query_vectors(dim_conf, n=None, seed=SEED):
-    """Pick n random embedding vectors from the smallest table as query vectors."""
+    """Pick n random embedding vectors from an available source table."""
     if n is None:
         n = NUM_QUERIES
     conn = get_conn()
     rng = random.Random(seed)
-    user_ids = rng.sample(range(100), min(n, 100))
-    query_table = dim_conf["query_table"]
-    vectors = []
-    cur = conn.cursor()
+    candidate_tables = [dim_conf["query_table"]]
+    candidate_tables.extend(dim_conf["tables"].values())
+    candidate_tables = list(dict.fromkeys(candidate_tables))
     try:
-        for uid in user_ids:
-            eid = rng.randint(0, 9999)
-            cur.execute(
-                f"SELECT embedding FROM {query_table} "
-                f"WHERE user_id={uid} AND id={eid} LIMIT 1"
-            )
-            row = cur.fetchone()
-            if row:
-                vectors.append({
-                    "user_id": uid,
-                    "id": eid,
-                    "embedding": row[0],
-                })
+        for query_table in candidate_tables:
+            if not table_exists(conn, query_table):
+                print(f"Query source table {query_table} not found, trying next candidate...")
+                continue
+
+            vectors = []
+            cur = conn.cursor()
+            try:
+                attempts = 0
+                max_attempts = max(n * 20, 100)
+                while len(vectors) < n and attempts < max_attempts:
+                    uid = rng.randrange(TOTAL_USERS)
+                    eid = rng.randint(0, 9999)
+                    cur.execute(
+                        f"SELECT embedding FROM {query_table} "
+                        f"WHERE user_id={uid} AND id={eid} LIMIT 1"
+                    )
+                    row = cur.fetchone()
+                    attempts += 1
+                    if row:
+                        vectors.append({
+                            "user_id": uid,
+                            "id": eid,
+                            "embedding": row[0],
+                        })
+            finally:
+                cur.close()
+
+            print(f"Loaded {len(vectors)} query vectors from {query_table}")
+            if vectors:
+                return vectors
     finally:
-        cur.close()
-    conn.close()
-    print(f"Loaded {len(vectors)} query vectors from {query_table}")
-    if not vectors:
-        raise RuntimeError(
-            f"No query vectors loaded from {query_table}. "
-            f"Please ensure the source table exists and contains data."
-        )
-    return vectors
+        conn.close()
+
+    raise RuntimeError(
+        "No query vectors loaded. Tried source tables: "
+        f"{candidate_tables}. Please ensure at least one source table exists and contains data."
+    )
 
 
 def format_vec(vec_str):
@@ -312,6 +341,27 @@ def recall_at_k(exact_ids, approx_ids):
     if not exact_ids:
         return 0.0
     return len(set(exact_ids) & set(approx_ids)) / len(exact_ids)
+
+
+def ensure_min_recall_queries(query_vecs, dim_conf, minimum=RECALL_MIN_QUERIES):
+    """Use enough query vectors to reduce recall variance."""
+    if len(query_vecs) >= minimum:
+        return query_vecs
+    print(f"  Recall uses {len(query_vecs)} queries; reloading {minimum} queries for a stabler estimate")
+    return load_query_vectors(dim_conf, n=minimum, seed=SEED + minimum)
+
+
+def recall_summary_stats(recalls):
+    """Summarize per-query recall values."""
+    values = np.array(recalls, dtype=float)
+    return {
+        "avg_recall": round(float(values.mean()), 4),
+        "min_recall": round(float(values.min()), 4),
+        "max_recall": round(float(values.max()), 4),
+        "std_recall": round(float(values.std()), 4),
+        "p10_recall": round(float(np.percentile(values, 10)), 4),
+        "p90_recall": round(float(np.percentile(values, 90)), 4),
+    }
 
 
 def run_bench(conn, sql_template, query_vecs, warmup=None, runs=None):
@@ -878,6 +928,7 @@ def test_recall(query_vecs, dim_conf, table_key="10w", recall_ks=None):
     if not query_vecs:
         raise RuntimeError("Recall test requires at least one query vector")
 
+    query_vecs = ensure_min_recall_queries(query_vecs, dim_conf)
     table = dim_conf["tables"][table_key]
     exact_fn = dim_conf["metric"]
     approx_fn = dim_conf["dist_fn"]
@@ -886,10 +937,11 @@ def test_recall(query_vecs, dim_conf, table_key="10w", recall_ks=None):
 
     print(f"\n{'=' * 60}")
     print(f"Scenario 11: Recall Test [{dim_conf['label']}] on {table} ({user_label})")
-    print(f"  Comparing {approx_fn} against exact {exact_fn}")
+    print(f"  Comparing {approx_fn} against exact {exact_fn} on the same table")
     print(f"{'=' * 60}")
 
-    conn = get_conn()
+    exact_conn = get_conn(apply_session_vars=False)
+    approx_conn = get_conn(apply_session_vars=False)
     results = []
     try:
         for k in recall_ks:
@@ -911,8 +963,8 @@ def test_recall(query_vecs, dim_conf, table_key="10w", recall_ks=None):
                     f"LIMIT {k}"
                 )
                 params = (vec,)
-                elapsed_exact, exact_rows = run_query_rows(conn, exact_sql, params)
-                elapsed_approx, approx_rows = run_query_rows(conn, approx_sql, params)
+                elapsed_exact, exact_rows = run_query_rows(exact_conn, exact_sql, params)
+                elapsed_approx, approx_rows = run_query_rows(approx_conn, approx_sql, params)
                 exact_ids = [r[0] for r in exact_rows]
                 approx_ids = [r[0] for r in approx_rows]
                 recalls.append(recall_at_k(exact_ids, approx_ids))
@@ -925,21 +977,21 @@ def test_recall(query_vecs, dim_conf, table_key="10w", recall_ks=None):
                 "dist_fn": approx_fn,
                 "exact_dist_fn": exact_fn,
                 "search_mode": dim_conf["search_mode"],
-                "avg_recall": round(float(np.mean(recalls)), 4),
-                "min_recall": round(float(min(recalls)), 4),
-                "max_recall": round(float(max(recalls)), 4),
                 "avg_exact_ms": round(float(np.mean(exact_lat)), 2),
                 "avg_approx_ms": round(float(np.mean(approx_lat)), 2),
                 "speedup": round(float(np.mean(exact_lat)) / max(float(np.mean(approx_lat)), 1e-9), 2),
                 "queries": len(query_vecs),
             }
+            stats.update(recall_summary_stats(recalls))
             add_run_metadata(stats)
             results.append(stats)
             print(f"  LIMIT {k:>4d}  recall={stats['avg_recall']:.4f}  "
+                  f"p10={stats['p10_recall']:.4f}  p90={stats['p90_recall']:.4f}  "
                   f"exact={stats['avg_exact_ms']:.1f}ms  approx={stats['avg_approx_ms']:.1f}ms  "
                   f"speedup={stats['speedup']:.2f}x")
     finally:
-        conn.close()
+        exact_conn.close()
+        approx_conn.close()
 
     return pd.DataFrame(results)
 

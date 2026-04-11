@@ -12,7 +12,8 @@
 #            - 768D: 只导入 cohere_user_1w / cohere_user_1w_pq
 #   Step 3: ETL 扩展到更大规模表
 #            - 1w -> 10w -> 50w -> 100w
-#   Step 4: 验证数据量
+#   Step 4: 为 pq_on_disk 表补建 ANN 索引并执行 BUILD INDEX
+#   Step 5: 验证数据量
 #
 # 可选环境变量:
 #   PARALLEL=4        并行导入路数 (默认4)
@@ -56,6 +57,14 @@ table_ready() {
   local count
   count=$(table_count "$table")
   [ "$count" = "$expected" ]
+}
+
+index_exists() {
+  local table="$1"
+  local index_name="$2"
+  local count
+  count=$(${MYSQL_CMD} -D "${DB}" -N -e "SHOW INDEX FROM ${table};" 2>/dev/null | awk -v idx="${index_name}" '$3 == idx {count++} END {print count + 0}')
+  [ "$count" -gt 0 ]
 }
 
 # 构建 mysql 命令（密码为空时不加 -p）
@@ -182,6 +191,19 @@ declare -A EXPECTED_ROWS=(
   ["100k"]="10000000"
   ["500k"]="50000000"
   ["1m"]="100000000"
+)
+
+declare -A ANN_INDEX_SQL_128D=(
+  ["10k"]="CREATE INDEX idx_embedding_ann ON sift_user_1w_pq (`embedding`) USING ANN PROPERTIES(\"index_type\"=\"pq_on_disk\", \"metric_type\"=\"l2_distance\", \"dim\"=\"128\", \"pq_m\"=\"64\", \"pq_nbits\"=\"8\")"
+  ["100k"]="CREATE INDEX idx_embedding_ann ON sift_user_10w_pq (`embedding`) USING ANN PROPERTIES(\"index_type\"=\"pq_on_disk\", \"metric_type\"=\"l2_distance\", \"dim\"=\"128\", \"pq_m\"=\"64\", \"pq_nbits\"=\"8\")"
+  ["500k"]="CREATE INDEX idx_embedding_ann ON sift_user_50w_pq (`embedding`) USING ANN PROPERTIES(\"index_type\"=\"pq_on_disk\", \"metric_type\"=\"l2_distance\", \"dim\"=\"128\", \"pq_m\"=\"64\", \"pq_nbits\"=\"8\")"
+  ["1m"]="CREATE INDEX idx_embedding_ann ON sift_user_100w_pq (`embedding`) USING ANN PROPERTIES(\"index_type\"=\"pq_on_disk\", \"metric_type\"=\"l2_distance\", \"dim\"=\"128\", \"pq_m\"=\"64\", \"pq_nbits\"=\"8\")"
+)
+declare -A ANN_INDEX_SQL_768D=(
+  ["10k"]="CREATE INDEX idx_embedding_ann ON cohere_user_1w_pq (`embedding`) USING ANN PROPERTIES(\"index_type\"=\"pq_on_disk\", \"metric_type\"=\"inner_product\", \"dim\"=\"768\", \"pq_m\"=\"384\", \"pq_nbits\"=\"8\")"
+  ["100k"]="CREATE INDEX idx_embedding_ann ON cohere_user_10w_pq (`embedding`) USING ANN PROPERTIES(\"index_type\"=\"pq_on_disk\", \"metric_type\"=\"inner_product\", \"dim\"=\"768\", \"pq_m\"=\"384\", \"pq_nbits\"=\"8\")"
+  ["500k"]="CREATE INDEX idx_embedding_ann ON cohere_user_50w_pq (`embedding`) USING ANN PROPERTIES(\"index_type\"=\"pq_on_disk\", \"metric_type\"=\"inner_product\", \"dim\"=\"768\", \"pq_m\"=\"384\", \"pq_nbits\"=\"8\")"
+  ["1m"]="CREATE INDEX idx_embedding_ann ON cohere_user_100w_pq (`embedding`) USING ANN PROPERTIES(\"index_type\"=\"pq_on_disk\", \"metric_type\"=\"inner_product\", \"dim\"=\"768\", \"pq_m\"=\"384\", \"pq_nbits\"=\"8\")"
 )
 
 DDL_PAIRS=()
@@ -438,11 +460,54 @@ if [ "$LOAD_MODE" = "etl_only" ]; then
 fi
 
 # --------------------------------------------------
-# Step 4: 验证
+# Step 4: 为 pq_on_disk 表补建 ANN 索引
+# --------------------------------------------------
+if [ "$INDEX_MODE" = "pq_on_disk" ]; then
+  echo ""
+  echo "========================================"
+  echo "Step 4: 创建并构建 ANN 索引"
+  echo "========================================"
+
+  build_ann_index() {
+    local table="$1"
+    local create_sql="$2"
+
+    if ! table_count "$table" >/dev/null 2>&1; then
+      echo "[SKIP] ${table} 不存在，跳过索引创建"
+      return
+    fi
+
+    if index_exists "$table" "idx_embedding_ann"; then
+      echo "[SKIP] ${table} 已存在 idx_embedding_ann"
+    else
+      echo "[SQL] ${create_sql}"
+      ${MYSQL_CMD} -D "${DB}" -e "${create_sql}" 2>&1 || { echo "[FAIL] CREATE INDEX on ${table}"; LOAD_ERRORS=$((LOAD_ERRORS + 1)); return; }
+    fi
+
+    echo "[SQL] BUILD INDEX idx_embedding_ann ON ${table}"
+    ${MYSQL_CMD} -D "${DB}" -e "BUILD INDEX idx_embedding_ann ON ${table}" 2>&1 || { echo "[FAIL] BUILD INDEX on ${table}"; LOAD_ERRORS=$((LOAD_ERRORS + 1)); }
+  }
+
+  for scale in ${SCALE_LIST}; do
+    if [ "$DIMS" = "all" ] || [ "$DIMS" = "128d" ]; then
+      if [ -n "${ANN_INDEX_SQL_128D[$scale]+x}" ]; then
+        build_ann_index "${TABLE_MAP_128D_PQ[$scale]}" "${ANN_INDEX_SQL_128D[$scale]}"
+      fi
+    fi
+    if [ "$DIMS" = "all" ] || [ "$DIMS" = "768d" ]; then
+      if [ -n "${ANN_INDEX_SQL_768D[$scale]+x}" ]; then
+        build_ann_index "${TABLE_MAP_768D_PQ[$scale]}" "${ANN_INDEX_SQL_768D[$scale]}"
+      fi
+    fi
+  done
+fi
+
+# --------------------------------------------------
+# Step 5: 验证
 # --------------------------------------------------
 echo ""
 echo "========================================"
-echo "Step 4: 验证数据量"
+echo "Step 5: 验证数据量"
 echo "========================================"
 
 EXPECTED=()

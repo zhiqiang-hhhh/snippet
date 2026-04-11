@@ -12,14 +12,7 @@ CREATE TABLE sift_user_50w_pq (
   user_id int NOT NULL COMMENT "用户ID (0-99)",
   id int NOT NULL COMMENT "用户内向量ID",
   embedding array<float> NOT NULL COMMENT "128维向量",
-  INDEX idx_user_id (`user_id`) USING INVERTED,
-  INDEX idx_embedding_ann (`embedding`) USING ANN PROPERTIES(
-    "index_type" = "pq_on_disk",
-    "metric_type" = "l2_distance",
-    "dim" = "128",
-    "pq_m" = "64",
-    "pq_nbits" = "8"
-  )
+  INDEX idx_user_id (`user_id`) USING INVERTED
 ) ENGINE=OLAP
 DUPLICATE KEY(user_id, id) COMMENT "100用户 x 50W向量 (pq_on_disk)"
 DISTRIBUTED BY HASH(user_id) BUCKETS 1
